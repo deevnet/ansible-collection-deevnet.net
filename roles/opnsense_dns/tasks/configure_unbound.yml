@@ -1,0 +1,80 @@
+---
+# Configure OPNsense Unbound DNS via API
+
+- name: Get current Unbound configuration
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/get"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: unbound_config
+
+- name: Extract existing host overrides
+  ansible.builtin.set_fact:
+    existing_overrides: "{{ unbound_config.json.unbound.hosts.host | default({}) }}"
+
+- name: Build list of existing hostnames
+  ansible.builtin.set_fact:
+    existing_hostnames: >-
+      {{
+        existing_overrides.values()
+        | map(attribute='hostname')
+        | list
+        if existing_overrides is mapping
+        else []
+      }}
+
+- name: Add host A records
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/addHostOverride"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      host:
+        enabled: "1"
+        hostname: "{{ item.hostname }}"
+        domain: "{{ dns_domain }}"
+        server: "{{ item.ip }}"
+        description: "Managed by Ansible"
+  loop: "{{ dns_host_records }}"
+  when: item.hostname not in existing_hostnames
+  register: host_results
+  changed_when: host_results.status == 200
+
+- name: Add service CNAME records (as aliases)
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/addHostOverride"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      host:
+        enabled: "1"
+        hostname: "{{ item.name }}"
+        domain: "{{ dns_domain }}"
+        server: "{{ hostvars[item.target]['ansible_host'] }}"
+        description: "Service alias for {{ item.target }} - Managed by Ansible"
+  loop: "{{ dns_service_records }}"
+  when: item.name not in existing_hostnames
+  register: cname_results
+  changed_when: cname_results.status == 200
+
+- name: Reconfigure Unbound to apply changes
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/service/reconfigure"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  when: (host_results.changed | default(false)) or (cname_results.changed | default(false))

@@ -1,0 +1,8 @@
+---
+# Main entry point for opnsense_dns role
+
+- name: Gather DNS records from inventory
+  ansible.builtin.include_tasks: gather_hosts.yml
+
+- name: Configure Unbound host overrides
+  ansible.builtin.include_tasks: configure_unbound.yml

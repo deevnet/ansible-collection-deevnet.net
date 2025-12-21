@@ -1,0 +1,15 @@
+---
+# OPNsense DNS role defaults
+
+# Domain for this substrate
+dns_domain: "dvntm.deevnet.net"
+
+# OPNsense API settings
+opnsense_api_url: "https://{{ ansible_host }}/api"
+opnsense_validate_certs: false
+
+# Host records will be built from inventory
+dns_host_records: []
+
+# Service CNAMEs (defined in group_vars/routers.yml)
+dns_service_records: []

@@ -1,0 +1,13 @@
+---
+# Configure OPNsense DNS for substrate
+#
+# Usage:
+#   export OPNSENSE_API_KEY="your-key"
+#   export OPNSENSE_API_SECRET="your-secret"
+#   ansible-playbook playbooks/dns.yml
+
+- name: Configure OPNsense DNS
+  hosts: routers
+  gather_facts: false
+  roles:
+    - opnsense_dns
