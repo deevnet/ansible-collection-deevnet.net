@@ -1,0 +1,16 @@
+namespace: deevnet
+name: net
+version: 1.0.0
+readme: README.md
+authors:
+  - Chris Deever
+license: MIT
+description: Network automation for Deevnet substrates (OPNsense, DNS, DHCP)
+tags:
+  - dns
+  - dhcp
+  - network
+  - provisioning
+  - opnsense
+dependencies:
+  ansible.posix: ">=1.5.0"

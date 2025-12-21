@@ -1,0 +1,23 @@
+---
+# Build DNS host records from inventory
+
+- name: Build host records from inventory
+  ansible.builtin.set_fact:
+    dns_host_records: >-
+      {{
+        dns_host_records | default([]) + [{
+          'hostname': item,
+          'ip': hostvars[item]['ansible_host'],
+          'fqdn': item + '.' + dns_domain
+        }]
+      }}
+  loop: "{{ groups['all'] }}"
+  when: hostvars[item]['ansible_host'] is defined
+
+- name: Display host records to be configured
+  ansible.builtin.debug:
+    msg: "DNS A records: {{ dns_host_records }}"
+
+- name: Display service records to be configured
+  ansible.builtin.debug:
+    msg: "DNS CNAMEs: {{ dns_service_records }}"
