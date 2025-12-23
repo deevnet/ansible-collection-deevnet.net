@@ -1,0 +1,99 @@
+---
+# Build DHCP reservation list from inventory
+# Reads from:
+#   infrastructure.interfaces.<name>.mac
+#   env.interfaces.<name>.ip
+#   env.interfaces.<name>.dns.dhcp_reservation
+
+- name: Initialize DHCP reservation lists
+  ansible.builtin.set_fact:
+    dhcp_reservations_to_add: []
+    dhcp_macs_to_remove: []
+
+- name: Build DHCP reservations from inventory (dhcp_reservation is true)
+  ansible.builtin.set_fact:
+    dhcp_reservations_to_add: >-
+      {{
+        dhcp_reservations_to_add + [{
+          'hostname': item,
+          'mac': _mac | upper,
+          'ip': _ip,
+          'interface': _interface_name,
+          'description': dhcp_description_prefix ~ ' - ' ~ item ~ ' (' ~ _interface_name ~ ')'
+        }]
+      }}
+  loop: "{{ groups['all'] }}"
+  when:
+    - hostvars[item]['env'] is defined
+    - hostvars[item]['env']['interfaces'] is defined
+    - hostvars[item]['infrastructure'] is defined
+    - hostvars[item]['infrastructure']['interfaces'] is defined
+    - _dhcp_interface | length > 0
+    - _mac is defined
+    - _mac not in ['UNKNOWN', 'unknown', '']
+    - _ip is defined
+    - _ip not in ['dhcp', 'null', none, '']
+  vars:
+    _env_interfaces: "{{ hostvars[item]['env']['interfaces'] | dict2items }}"
+    _infra_interfaces: "{{ hostvars[item]['infrastructure']['interfaces'] }}"
+    # Find interface with dhcp_reservation: true
+    _dhcp_interface: >-
+      {{
+        _env_interfaces
+        | selectattr('value.dns', 'defined')
+        | selectattr('value.dns.dhcp_reservation', 'defined')
+        | selectattr('value.dns.dhcp_reservation', 'equalto', true)
+        | first
+        | default({})
+      }}
+    _interface_name: "{{ _dhcp_interface.key | default('') }}"
+    _ip: "{{ _dhcp_interface.value.ip | default(none) }}"
+    _mac: "{{ _infra_interfaces[_interface_name].mac | default('') if _interface_name and _interface_name in _infra_interfaces else '' }}"
+
+- name: Build list of MACs to remove (dhcp_reservation is false)
+  ansible.builtin.set_fact:
+    dhcp_macs_to_remove: >-
+      {{
+        dhcp_macs_to_remove + [_mac | upper]
+      }}
+  loop: "{{ groups['all'] }}"
+  when:
+    - hostvars[item]['env'] is defined
+    - hostvars[item]['env']['interfaces'] is defined
+    - hostvars[item]['infrastructure'] is defined
+    - hostvars[item]['infrastructure']['interfaces'] is defined
+    - _dhcp_interface | length > 0
+    - _mac is defined
+    - _mac not in ['UNKNOWN', 'unknown', '']
+  vars:
+    _env_interfaces: "{{ hostvars[item]['env']['interfaces'] | dict2items }}"
+    _infra_interfaces: "{{ hostvars[item]['infrastructure']['interfaces'] }}"
+    # Find interface with dhcp_reservation: false (explicitly set)
+    _dhcp_interface: >-
+      {{
+        _env_interfaces
+        | selectattr('value.dns', 'defined')
+        | selectattr('value.dns.dhcp_reservation', 'defined')
+        | selectattr('value.dns.dhcp_reservation', 'equalto', false)
+        | first
+        | default({})
+      }}
+    _interface_name: "{{ _dhcp_interface.key | default('') }}"
+    _mac: "{{ _infra_interfaces[_interface_name].mac | default('') if _interface_name and _interface_name in _infra_interfaces else '' }}"
+
+- name: Display DHCP reservations to be configured
+  ansible.builtin.debug:
+    msg: "DHCP reservations to add: {{ dhcp_reservations_to_add | map(attribute='hostname') | list }}"
+
+- name: Display DHCP reservations details
+  ansible.builtin.debug:
+    msg: "{{ item.hostname }}: {{ item.mac }} -> {{ item.ip }}"
+    verbosity: 1
+  loop: "{{ dhcp_reservations_to_add }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+
+- name: Display MACs to remove
+  ansible.builtin.debug:
+    msg: "MACs to remove (if exist): {{ dhcp_macs_to_remove }}"
+  when: dhcp_macs_to_remove | length > 0

@@ -1,0 +1,20 @@
+---
+# OPNsense DHCP role defaults (Kea DHCP)
+
+# Domain for this substrate (used in descriptions)
+dhcp_domain: "dvntm.deevnet.net"
+
+# OPNsense API settings (typically inherited from group_vars/routers.yml)
+opnsense_api_url: "https://{{ ansible_host }}/api"
+opnsense_validate_certs: false
+
+# Kea DHCP subnet UUID - MUST be set in group_vars
+# Kea requires reservations to be linked to a subnet
+# Get UUID via: curl -u "$KEY:$SECRET" "https://opnsense/api/kea/dhcpv4/search_subnet"
+dhcp_subnet_uuid: ""
+
+# Description prefix for managed reservations
+dhcp_description_prefix: "Ansible managed"
+
+# DHCP reservations will be built from inventory
+dhcp_reservations: []

@@ -1,0 +1,13 @@
+---
+# Configure OPNsense DHCP for substrate
+#
+# Usage:
+#   export OPNSENSE_API_KEY="your-key"
+#   export OPNSENSE_API_SECRET="your-secret"
+#   ansible-playbook playbooks/dhcp.yml
+
+- name: Configure OPNsense DHCP
+  hosts: dhcp_servers
+  gather_facts: false
+  roles:
+    - opnsense_dhcp

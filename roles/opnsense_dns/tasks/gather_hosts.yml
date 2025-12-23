@@ -1,23 +1,61 @@
 ---
-# Build DNS host records from inventory
+# Build DNS host records and CNAME records from inventory
+# Reads from env.interfaces.<name>.dns flags on each host
 
-- name: Build host records from inventory
+- name: Initialize DNS record lists
+  ansible.builtin.set_fact:
+    dns_host_records: []
+    dns_cname_records: []
+
+- name: Build host A records from inventory
   ansible.builtin.set_fact:
     dns_host_records: >-
       {{
-        dns_host_records | default([]) + [{
+        dns_host_records + [{
           'hostname': item,
-          'ip': hostvars[item]['ansible_host'],
-          'fqdn': item + '.' + dns_domain
+          'ip': _dns_ip,
+          'fqdn': item + '.' + dns_domain,
+          'cnames': _dns_cnames
         }]
       }}
   loop: "{{ groups['all'] }}"
-  when: hostvars[item]['ansible_host'] is defined
+  when:
+    - hostvars[item]['env'] is defined
+    - hostvars[item]['env']['interfaces'] is defined
+    - _dns_ip is defined
+    - _dns_ip not in ['dhcp', 'null', none, '']
+  vars:
+    _interfaces: "{{ hostvars[item]['env']['interfaces'] | dict2items }}"
+    _dns_interface: >-
+      {{
+        _interfaces
+        | selectattr('value.dns', 'defined')
+        | selectattr('value.dns.host_a_record', 'defined')
+        | selectattr('value.dns.host_a_record', 'equalto', true)
+        | first
+        | default({})
+      }}
+    _dns_ip: "{{ _dns_interface.value.ip | default(none) }}"
+    _dns_cnames: "{{ _dns_interface.value.dns.cnames | default([]) }}"
 
-- name: Display host records to be configured
-  ansible.builtin.debug:
-    msg: "DNS A records: {{ dns_host_records }}"
+- name: Build CNAME records from host records
+  ansible.builtin.set_fact:
+    dns_cname_records: >-
+      {{
+        dns_cname_records + [{
+          'name': item.1,
+          'target_host': item.0.hostname,
+          'target_ip': item.0.ip
+        }]
+      }}
+  loop: "{{ dns_host_records | subelements('cnames', skip_missing=true) }}"
+  loop_control:
+    label: "{{ item.1 }} -> {{ item.0.hostname }}"
 
-- name: Display service records to be configured
+- name: Display host A records to be configured
   ansible.builtin.debug:
-    msg: "DNS CNAMEs: {{ dns_service_records }}"
+    msg: "DNS A records: {{ dns_host_records | map(attribute='hostname') | list }}"
+
+- name: Display CNAME records to be configured
+  ansible.builtin.debug:
+    msg: "DNS CNAMEs: {{ dns_cname_records | map(attribute='name') | list }}"

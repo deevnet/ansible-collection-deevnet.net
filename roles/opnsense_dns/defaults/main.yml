@@ -4,6 +4,9 @@
 # Domain for this substrate
 dns_domain: "dvntm.deevnet.net"
 
+# TTL for DNS records (seconds)
+dns_record_ttl: 300
+
 # OPNsense API settings
 opnsense_api_url: "https://{{ ansible_host }}/api"
 opnsense_validate_certs: false
