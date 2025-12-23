@@ -1,0 +1,12 @@
+---
+# Handlers for opnsense_dns role
+
+- name: reconfigure unbound
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/service/reconfigure"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  delegate_to: localhost

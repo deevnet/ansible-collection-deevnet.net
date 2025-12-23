@@ -1,5 +1,5 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
-        dns list clean-deps clean-project deep-clean all
+        dns dhcp list clean-deps clean-project deep-clean all
 
 # ---------- Config ----------
 COLLECTION_NAME ?= deevnet-net
@@ -42,6 +42,9 @@ help:
 "" \
 "  dns" \
 "      Configure OPNsense DNS (requires OPNSENSE_API_KEY and OPNSENSE_API_SECRET env vars)" \
+"" \
+"  dhcp" \
+"      Configure OPNsense DHCP static reservations (requires OPNSENSE_API_KEY and OPNSENSE_API_SECRET env vars)" \
 "" \
 "  list" \
 "      Show installed collections in project and user paths" \
@@ -99,6 +102,14 @@ dns: install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/dns.yml
 
+dhcp: install-dev
+	@if [ -z "$$OPNSENSE_API_KEY" ] || [ -z "$$OPNSENSE_API_SECRET" ]; then \
+		echo "Error: OPNSENSE_API_KEY and OPNSENSE_API_SECRET must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/dhcp.yml
+
 # ---------- Inspection ----------
 list:
 	@echo "== Project collections ($(PROJECT_COLLECTIONS_PATH)) =="
@@ -118,4 +129,4 @@ deep-clean: clean-project
 	rm -rf "$(USER_COLLECTIONS_PATH)"
 	rm -f "$(DEPS_STAMP)"
 
-all: rebuild dns
+all: rebuild dns dhcp

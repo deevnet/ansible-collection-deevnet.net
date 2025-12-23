@@ -1,6 +1,11 @@
 ---
-# Configure OPNsense Unbound DNS via API
+# Configure OPNsense Unbound DNS using host overrides and aliases via API
+#
+# Uses the OPNsense API to manage:
+#   - Host overrides (A records)
+#   - Host aliases (CNAMEs pointing to host overrides)
 
+# Step 1: Get existing configuration
 - name: Get current Unbound configuration
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/unbound/settings/get"
@@ -11,23 +16,63 @@
     validate_certs: "{{ opnsense_validate_certs }}"
     return_content: true
   register: unbound_config
+  delegate_to: localhost
 
-- name: Extract existing host overrides
+# Step 2: Extract existing UUIDs for cleanup
+- name: Extract existing host override UUIDs
   ansible.builtin.set_fact:
-    existing_overrides: "{{ unbound_config.json.unbound.hosts.host | default({}) }}"
-
-- name: Build list of existing hostnames
-  ansible.builtin.set_fact:
-    existing_hostnames: >-
+    existing_override_uuids: >-
       {{
-        existing_overrides.values()
-        | map(attribute='hostname')
-        | list
-        if existing_overrides is mapping
+        unbound_config.json.unbound.hosts.host.keys() | list
+        if unbound_config.json.unbound.hosts.host is mapping
         else []
       }}
 
-- name: Add host A records
+- name: Extract existing host alias UUIDs
+  ansible.builtin.set_fact:
+    existing_alias_uuids: >-
+      {{
+        unbound_config.json.unbound.aliases.alias.keys() | list
+        if unbound_config.json.unbound.aliases.alias is mapping
+        else []
+      }}
+
+- name: Display records to be cleaned up
+  ansible.builtin.debug:
+    msg: "Will delete {{ existing_override_uuids | length }} host overrides and {{ existing_alias_uuids | length }} aliases"
+
+# Step 3: Delete existing aliases first (they depend on host overrides)
+- name: Delete existing host aliases
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/delHostAlias/{{ item }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  loop: "{{ existing_alias_uuids }}"
+  loop_control:
+    label: "Deleting alias {{ item }}"
+  when: existing_alias_uuids | length > 0
+  delegate_to: localhost
+
+# Step 4: Delete existing host overrides
+- name: Delete existing host overrides
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/delHostOverride/{{ item }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  loop: "{{ existing_override_uuids }}"
+  loop_control:
+    label: "Deleting override {{ item }}"
+  when: existing_override_uuids | length > 0
+  delegate_to: localhost
+
+# Step 5: Create host overrides (A records)
+- name: Create host overrides for A records
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/unbound/settings/addHostOverride"
     method: POST
@@ -42,15 +87,46 @@
         hostname: "{{ item.hostname }}"
         domain: "{{ dns_domain }}"
         server: "{{ item.ip }}"
-        description: "Managed by Ansible"
+        description: "Ansible managed - {{ item.hostname }}"
   loop: "{{ dns_host_records }}"
-  when: item.hostname not in existing_hostnames
-  register: host_results
-  changed_when: host_results.status == 200
+  loop_control:
+    label: "{{ item.hostname }}.{{ dns_domain }} -> {{ item.ip }}"
+  register: host_override_results
+  delegate_to: localhost
 
-- name: Add service CNAME records (as aliases)
+# Step 6: Build mapping of hostnames to their override UUIDs for alias creation
+- name: Get updated Unbound configuration with new overrides
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/unbound/settings/addHostOverride"
+    url: "{{ opnsense_api_url }}/unbound/settings/get"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: updated_unbound_config
+  delegate_to: localhost
+  when: dns_cname_records | length > 0
+
+- name: Build hostname to UUID mapping
+  ansible.builtin.set_fact:
+    hostname_uuid_map: >-
+      {{
+        hostname_uuid_map | default({}) | combine({
+          (item.value.hostname | string): item.key
+        })
+      }}
+  loop: "{{ updated_unbound_config.json.unbound.hosts.host | dict2items }}"
+  loop_control:
+    label: "{{ item.value.hostname }}"
+  when:
+    - dns_cname_records | length > 0
+    - updated_unbound_config.json.unbound.hosts.host is mapping
+
+# Step 7: Create host aliases (CNAMEs)
+- name: Create host aliases for CNAMEs
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/addHostAlias"
     method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
@@ -58,18 +134,23 @@
     validate_certs: "{{ opnsense_validate_certs }}"
     body_format: json
     body:
-      host:
+      alias:
         enabled: "1"
+        host: "{{ hostname_uuid_map[item.target_host] }}"
         hostname: "{{ item.name }}"
         domain: "{{ dns_domain }}"
-        server: "{{ hostvars[item.target]['ansible_host'] }}"
-        description: "Service alias for {{ item.target }} - Managed by Ansible"
-  loop: "{{ dns_service_records }}"
-  when: item.name not in existing_hostnames
-  register: cname_results
-  changed_when: cname_results.status == 200
+        description: "Ansible managed - {{ item.name }} -> {{ item.target_host }}"
+  loop: "{{ dns_cname_records }}"
+  loop_control:
+    label: "{{ item.name }}.{{ dns_domain }} -> {{ item.target_host }}.{{ dns_domain }}"
+  when:
+    - dns_cname_records | length > 0
+    - hostname_uuid_map is defined
+    - hostname_uuid_map[item.target_host] is defined
+  delegate_to: localhost
 
-- name: Reconfigure Unbound to apply changes
+# Step 8: Reconfigure Unbound to apply changes
+- name: Reconfigure Unbound service
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/unbound/service/reconfigure"
     method: POST
@@ -77,4 +158,13 @@
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
-  when: (host_results.changed | default(false)) or (cname_results.changed | default(false))
+  register: reconfigure_result
+  delegate_to: localhost
+
+- name: Report completion
+  ansible.builtin.debug:
+    msg: >-
+      DNS configuration complete via API:
+      - Created {{ dns_host_records | length }} host overrides (A records)
+      - Created {{ dns_cname_records | length }} host aliases (CNAMEs)
+      - Domain: {{ dns_domain }}
