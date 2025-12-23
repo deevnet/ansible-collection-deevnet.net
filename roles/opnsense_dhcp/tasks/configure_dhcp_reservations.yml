@@ -1,0 +1,166 @@
+---
+# Configure OPNsense Kea DHCP static reservations via API
+#
+# Strategy:
+#   1. Fetch current reservations from Kea DHCP API
+#   2. Build mapping of MAC -> UUID for existing reservations
+#   3. For each desired reservation:
+#      - If MAC exists with different hostname/IP: update via set_reservation
+#      - If MAC does not exist: add via add_reservation
+#   4. For MACs marked for removal: delete via del_reservation
+#   5. Reconfigure DHCP service to apply changes
+
+# Step 1: Get current Kea DHCP reservations
+- name: Get current DHCP reservations
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/search_reservation"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: dhcp_reservations
+  delegate_to: localhost
+
+- name: Display current reservations count
+  ansible.builtin.debug:
+    msg: "Found {{ dhcp_reservations.json.rows | default([]) | length }} existing DHCP reservations"
+
+# Step 2: Build MAC -> existing reservation mapping
+- name: Build MAC to reservation UUID mapping
+  ansible.builtin.set_fact:
+    existing_maps_by_mac: >-
+      {{
+        existing_maps_by_mac | default({}) | combine({
+          (item.hw_address | upper): {
+            'uuid': item.uuid,
+            'ip': item.ip_address | default(''),
+            'hostname': item.hostname | default(''),
+            'description': item.description | default('')
+          }
+        })
+      }}
+  loop: "{{ dhcp_reservations.json.rows | default([]) }}"
+  loop_control:
+    label: "{{ item.hw_address | default('unknown') }}"
+  when: item.hw_address is defined
+
+- name: Ensure existing_maps_by_mac is defined
+  ansible.builtin.set_fact:
+    existing_maps_by_mac: {}
+  when: existing_maps_by_mac is not defined
+
+# Step 3: Categorize reservations into add/update
+- name: Categorize reservations for processing
+  ansible.builtin.set_fact:
+    reservations_to_add: >-
+      {{
+        dhcp_reservations_to_add
+        | rejectattr('mac', 'in', existing_maps_by_mac.keys() | list)
+        | list
+      }}
+    reservations_to_update: >-
+      {{
+        dhcp_reservations_to_add
+        | selectattr('mac', 'in', existing_maps_by_mac.keys() | list)
+        | list
+      }}
+
+- name: Display categorized reservations
+  ansible.builtin.debug:
+    msg: |
+      Reservations to add: {{ reservations_to_add | length }}
+      Reservations to check/update: {{ reservations_to_update | length }}
+      MACs to remove: {{ dhcp_macs_to_remove | default([]) | length }}
+
+# Step 4: Add new reservations
+- name: Add new DHCP reservations
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/add_reservation"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      reservation:
+        subnet: "{{ dhcp_subnet_uuid }}"
+        hw_address: "{{ item.mac }}"
+        ip_address: "{{ item.ip }}"
+        hostname: "{{ item.hostname }}"
+        description: "{{ item.description }}"
+    status_code: [200, 201]
+  loop: "{{ reservations_to_add }}"
+  loop_control:
+    label: "Adding: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
+  when: reservations_to_add | length > 0
+  register: add_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
+# Step 5: Update existing reservations if IP or hostname changed
+- name: Update existing DHCP reservations (if changed)
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/set_reservation/{{ existing_maps_by_mac[item.mac].uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      reservation:
+        subnet: "{{ dhcp_subnet_uuid }}"
+        hw_address: "{{ item.mac }}"
+        ip_address: "{{ item.ip }}"
+        hostname: "{{ item.hostname }}"
+        description: "{{ item.description }}"
+    status_code: [200, 201]
+  loop: "{{ reservations_to_update }}"
+  loop_control:
+    label: "Updating: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
+  when:
+    - reservations_to_update | length > 0
+    - existing_maps_by_mac[item.mac].ip != item.ip or
+      existing_maps_by_mac[item.mac].hostname != item.hostname
+  register: update_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
+# Step 6: Delete reservations for MACs with dhcp_reservation: false
+- name: Delete DHCP reservations marked for removal
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/del_reservation/{{ existing_maps_by_mac[item].uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    status_code: [200, 201]
+  loop: "{{ dhcp_macs_to_remove | default([]) }}"
+  loop_control:
+    label: "Deleting reservation for MAC: {{ item }}"
+  when:
+    - dhcp_macs_to_remove is defined
+    - dhcp_macs_to_remove | length > 0
+    - item in existing_maps_by_mac
+  register: delete_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
+# Step 7: Report completion
+- name: Report DHCP configuration results
+  ansible.builtin.debug:
+    msg: |
+      DHCP reservation configuration complete (Kea DHCP):
+      - Added: {{ reservations_to_add | length }}
+      - Checked for updates: {{ reservations_to_update | length }}
+      - Removed: {{ (delete_results.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list | length) | default(0) }}
+      - Subnet UUID: {{ dhcp_subnet_uuid }}

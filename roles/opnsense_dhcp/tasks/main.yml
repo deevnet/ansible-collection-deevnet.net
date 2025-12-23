@@ -19,4 +19,4 @@
   ansible.builtin.include_tasks: gather_hosts.yml
 
 - name: Configure Kea DHCP reservations
-  ansible.builtin.include_tasks: configure_dhcp.yml
+  ansible.builtin.include_tasks: configure_dhcp_reservations.yml
