@@ -4,6 +4,9 @@
 # Domain for this substrate
 dns_domain: "dvntm.deevnet.net"
 
+# Description prefix for Ansible-managed records
+dns_description_prefix: "Ansible managed"
+
 # TTL for DNS records (seconds)
 dns_record_ttl: 300
 

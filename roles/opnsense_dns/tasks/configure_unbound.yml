@@ -1,11 +1,19 @@
 ---
 # Configure OPNsense Unbound DNS using host overrides and aliases via API
 #
-# Uses the OPNsense API to manage:
-#   - Host overrides (A records)
-#   - Host aliases (CNAMEs pointing to host overrides)
+# Strategy (idempotent):
+#   1. Fetch current host overrides and aliases from Unbound API
+#   2. Build mappings of hostname -> existing record for comparison
+#   3. For each desired host override:
+#      - If hostname exists with different IP: update via setHostOverride
+#      - If hostname does not exist: add via addHostOverride
+#   4. For each desired alias:
+#      - If alias exists with different target: update via setHostAlias
+#      - If alias does not exist: add via addHostAlias
+#   5. Optionally delete unmanaged records (controlled by dns_delete_unmanaged)
+#   6. Reconfigure Unbound service to apply changes
 
-# Step 1: Get existing configuration
+# Step 1: Get current Unbound configuration
 - name: Get current Unbound configuration
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/unbound/settings/get"
@@ -18,61 +26,104 @@
   register: unbound_config
   delegate_to: localhost
 
-# Step 2: Extract existing UUIDs for cleanup
-- name: Extract existing host override UUIDs
+# Step 2: Build hostname -> existing override mapping
+- name: Build hostname to existing override mapping
   ansible.builtin.set_fact:
-    existing_override_uuids: >-
+    existing_overrides_by_hostname: >-
       {{
-        unbound_config.json.unbound.hosts.host.keys() | list
-        if unbound_config.json.unbound.hosts.host is mapping
-        else []
+        existing_overrides_by_hostname | default({}) | combine({
+          (item.value.hostname | string): {
+            'uuid': item.key,
+            'hostname': item.value.hostname | default(''),
+            'domain': item.value.domain | default(''),
+            'ip': item.value.server | default(''),
+            'description': item.value.description | default('')
+          }
+        })
       }}
+  loop: "{{ unbound_config.json.unbound.hosts.host | dict2items }}"
+  loop_control:
+    label: "{{ item.value.hostname | default('unknown') }}"
+  when:
+    - unbound_config.json.unbound.hosts.host is mapping
+    - item.value.hostname is defined
 
-- name: Extract existing host alias UUIDs
+- name: Ensure existing_overrides_by_hostname is defined
   ansible.builtin.set_fact:
-    existing_alias_uuids: >-
-      {{
-        unbound_config.json.unbound.aliases.alias.keys() | list
-        if unbound_config.json.unbound.aliases.alias is mapping
-        else []
-      }}
+    existing_overrides_by_hostname: {}
+  when: existing_overrides_by_hostname is not defined
 
-- name: Display records to be cleaned up
+# Step 3: Build alias name -> existing alias mapping
+# Note: OPNsense returns 'host' as a selected-style dict: {"uuid": {"value": "name", "selected": 1}}
+# We need to extract the UUID key that has selected=1
+- name: Build alias name to existing alias mapping
+  ansible.builtin.set_fact:
+    existing_aliases_by_name: >-
+      {{
+        existing_aliases_by_name | default({}) | combine({
+          (item.value.hostname | string): {
+            'uuid': item.key,
+            'hostname': item.value.hostname | default(''),
+            'domain': item.value.domain | default(''),
+            'host_uuid': _extracted_host_uuid,
+            'description': item.value.description | default('')
+          }
+        })
+      }}
+  loop: "{{ unbound_config.json.unbound.aliases.alias | dict2items }}"
+  loop_control:
+    label: "{{ item.value.hostname | default('unknown') }}"
+  vars:
+    # Handle both string UUID and selected-style dict formats
+    _extracted_host_uuid: >-
+      {{
+        item.value.host if item.value.host is string
+        else (
+          item.value.host | dict2items
+          | selectattr('value.selected', 'defined')
+          | selectattr('value.selected', 'equalto', 1)
+          | map(attribute='key')
+          | first
+          | default('')
+        )
+      }}
+  when:
+    - unbound_config.json.unbound.aliases.alias is mapping
+    - item.value.hostname is defined
+
+- name: Ensure existing_aliases_by_name is defined
+  ansible.builtin.set_fact:
+    existing_aliases_by_name: {}
+  when: existing_aliases_by_name is not defined
+
+- name: Display current record counts
   ansible.builtin.debug:
-    msg: "Will delete {{ existing_override_uuids | length }} host overrides and {{ existing_alias_uuids | length }} aliases"
+    msg: "Found {{ existing_overrides_by_hostname | length }} existing host overrides and {{ existing_aliases_by_name | length }} existing aliases"
 
-# Step 3: Delete existing aliases first (they depend on host overrides)
-- name: Delete existing host aliases
-  ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/unbound/settings/delHostAlias/{{ item }}"
-    method: POST
-    user: "{{ opnsense_api_key }}"
-    password: "{{ opnsense_api_secret }}"
-    force_basic_auth: true
-    validate_certs: "{{ opnsense_validate_certs }}"
-  loop: "{{ existing_alias_uuids }}"
-  loop_control:
-    label: "Deleting alias {{ item }}"
-  when: existing_alias_uuids | length > 0
-  delegate_to: localhost
+# Step 4: Categorize host overrides into add/update
+- name: Categorize host overrides for processing
+  ansible.builtin.set_fact:
+    overrides_to_add: >-
+      {{
+        dns_host_records
+        | rejectattr('hostname', 'in', existing_overrides_by_hostname.keys() | list)
+        | list
+      }}
+    overrides_to_check: >-
+      {{
+        dns_host_records
+        | selectattr('hostname', 'in', existing_overrides_by_hostname.keys() | list)
+        | list
+      }}
 
-# Step 4: Delete existing host overrides
-- name: Delete existing host overrides
-  ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/unbound/settings/delHostOverride/{{ item }}"
-    method: POST
-    user: "{{ opnsense_api_key }}"
-    password: "{{ opnsense_api_secret }}"
-    force_basic_auth: true
-    validate_certs: "{{ opnsense_validate_certs }}"
-  loop: "{{ existing_override_uuids }}"
-  loop_control:
-    label: "Deleting override {{ item }}"
-  when: existing_override_uuids | length > 0
-  delegate_to: localhost
+- name: Display categorized host overrides
+  ansible.builtin.debug:
+    msg: |
+      Host overrides to add: {{ overrides_to_add | length }}
+      Host overrides to check/update: {{ overrides_to_check | length }}
 
-# Step 5: Create host overrides (A records)
-- name: Create host overrides for A records
+# Step 5: Add new host overrides
+- name: Add new host overrides
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/unbound/settings/addHostOverride"
     method: POST
@@ -87,14 +138,45 @@
         hostname: "{{ item.hostname }}"
         domain: "{{ dns_domain }}"
         server: "{{ item.ip }}"
-        description: "Ansible managed - {{ item.hostname }}"
-  loop: "{{ dns_host_records }}"
+        description: "{{ dns_description_prefix }} - {{ item.hostname }}"
+  loop: "{{ overrides_to_add }}"
   loop_control:
-    label: "{{ item.hostname }}.{{ dns_domain }} -> {{ item.ip }}"
-  register: host_override_results
+    label: "Adding: {{ item.hostname }}.{{ dns_domain }} -> {{ item.ip }}"
+  when: overrides_to_add | length > 0
+  register: add_override_results
   delegate_to: localhost
+  changed_when: true
+  notify: reconfigure unbound
 
-# Step 6: Build mapping of hostnames to their override UUIDs for alias creation
+# Step 6: Update existing host overrides (if IP changed)
+- name: Update existing host overrides (if changed)
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/setHostOverride/{{ existing_overrides_by_hostname[item.hostname].uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      host:
+        enabled: "1"
+        hostname: "{{ item.hostname }}"
+        domain: "{{ dns_domain }}"
+        server: "{{ item.ip }}"
+        description: "{{ dns_description_prefix }} - {{ item.hostname }}"
+  loop: "{{ overrides_to_check }}"
+  loop_control:
+    label: "Checking: {{ item.hostname }}.{{ dns_domain }} ({{ existing_overrides_by_hostname[item.hostname].ip }} -> {{ item.ip }})"
+  when:
+    - overrides_to_check | length > 0
+    - existing_overrides_by_hostname[item.hostname].ip != item.ip
+  register: update_override_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure unbound
+
+# Step 7: Refresh config to get UUIDs for new overrides (needed for alias creation)
 - name: Get updated Unbound configuration with new overrides
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/unbound/settings/get"
@@ -108,6 +190,7 @@
   delegate_to: localhost
   when: dns_cname_records | length > 0
 
+# Step 8: Build hostname to UUID mapping for alias target resolution
 - name: Build hostname to UUID mapping
   ansible.builtin.set_fact:
     hostname_uuid_map: >-
@@ -123,8 +206,52 @@
     - dns_cname_records | length > 0
     - updated_unbound_config.json.unbound.hosts.host is mapping
 
-# Step 7: Create host aliases (CNAMEs)
-- name: Create host aliases for CNAMEs
+- name: Ensure hostname_uuid_map is defined
+  ansible.builtin.set_fact:
+    hostname_uuid_map: {}
+  when: hostname_uuid_map is not defined
+
+# Debug: Show what we're comparing for aliases
+- name: Debug existing alias host_uuid extraction
+  ansible.builtin.debug:
+    msg: "Alias '{{ item.key }}': extracted host_uuid='{{ item.value.host_uuid }}'"
+  loop: "{{ existing_aliases_by_name | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: existing_aliases_by_name | length > 0
+
+# Step 9: Categorize aliases into add/update
+- name: Categorize aliases for processing
+  ansible.builtin.set_fact:
+    aliases_to_add: >-
+      {{
+        dns_cname_records
+        | rejectattr('name', 'in', existing_aliases_by_name.keys() | list)
+        | list
+      }}
+    aliases_to_check: >-
+      {{
+        dns_cname_records
+        | selectattr('name', 'in', existing_aliases_by_name.keys() | list)
+        | list
+      }}
+  when: dns_cname_records | length > 0
+
+- name: Ensure alias lists are defined
+  ansible.builtin.set_fact:
+    aliases_to_add: []
+    aliases_to_check: []
+  when: dns_cname_records | length == 0
+
+- name: Display categorized aliases
+  ansible.builtin.debug:
+    msg: |
+      Aliases to add: {{ aliases_to_add | length }}
+      Aliases to check/update: {{ aliases_to_check | length }}
+  when: dns_cname_records | length > 0
+
+# Step 10: Add new aliases
+- name: Add new host aliases
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/unbound/settings/addHostAlias"
     method: POST
@@ -139,32 +266,65 @@
         host: "{{ hostname_uuid_map[item.target_host] }}"
         hostname: "{{ item.name }}"
         domain: "{{ dns_domain }}"
-        description: "Ansible managed - {{ item.name }} -> {{ item.target_host }}"
-  loop: "{{ dns_cname_records }}"
+        description: "{{ dns_description_prefix }} - {{ item.name }} -> {{ item.target_host }}"
+  loop: "{{ aliases_to_add }}"
   loop_control:
-    label: "{{ item.name }}.{{ dns_domain }} -> {{ item.target_host }}.{{ dns_domain }}"
+    label: "Adding: {{ item.name }}.{{ dns_domain }} -> {{ item.target_host }}"
   when:
-    - dns_cname_records | length > 0
-    - hostname_uuid_map is defined
+    - aliases_to_add | length > 0
     - hostname_uuid_map[item.target_host] is defined
+  register: add_alias_results
   delegate_to: localhost
+  changed_when: true
+  notify: reconfigure unbound
 
-# Step 8: Reconfigure Unbound to apply changes
-- name: Reconfigure Unbound service
+# Debug: Show alias comparison
+- name: Debug alias comparison values
+  ansible.builtin.debug:
+    msg: "{{ item.name }}: existing='{{ existing_aliases_by_name[item.name].host_uuid }}' vs desired='{{ hostname_uuid_map[item.target_host] }}' => {{ 'DIFFERENT' if existing_aliases_by_name[item.name].host_uuid != hostname_uuid_map[item.target_host] else 'SAME' }}"
+  loop: "{{ aliases_to_check }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - aliases_to_check | length > 0
+    - hostname_uuid_map[item.target_host] is defined
+
+# Step 11: Update existing aliases (if target changed)
+- name: Update existing host aliases (if target changed)
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/unbound/service/reconfigure"
+    url: "{{ opnsense_api_url }}/unbound/settings/setHostAlias/{{ existing_aliases_by_name[item.name].uuid }}"
     method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
-  register: reconfigure_result
+    body_format: json
+    body:
+      alias:
+        enabled: "1"
+        host: "{{ hostname_uuid_map[item.target_host] }}"
+        hostname: "{{ item.name }}"
+        domain: "{{ dns_domain }}"
+        description: "{{ dns_description_prefix }} - {{ item.name }} -> {{ item.target_host }}"
+  loop: "{{ aliases_to_check }}"
+  loop_control:
+    label: "Checking: {{ item.name }}.{{ dns_domain }} -> {{ item.target_host }}"
+  when:
+    - aliases_to_check | length > 0
+    - hostname_uuid_map[item.target_host] is defined
+    - existing_aliases_by_name[item.name].host_uuid != hostname_uuid_map[item.target_host]
+  register: update_alias_results
   delegate_to: localhost
+  changed_when: true
+  notify: reconfigure unbound
 
-- name: Report completion
+# Step 12: Report completion
+- name: Report DNS configuration results
   ansible.builtin.debug:
-    msg: >-
-      DNS configuration complete via API:
-      - Created {{ dns_host_records | length }} host overrides (A records)
-      - Created {{ dns_cname_records | length }} host aliases (CNAMEs)
+    msg: |
+      DNS configuration complete (idempotent):
+      - Host overrides added: {{ overrides_to_add | length }}
+      - Host overrides checked: {{ overrides_to_check | length }}
+      - Aliases added: {{ aliases_to_add | length }}
+      - Aliases checked: {{ aliases_to_check | length }}
       - Domain: {{ dns_domain }}
