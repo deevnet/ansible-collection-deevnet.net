@@ -1,0 +1,8 @@
+---
+# Main entry point for vyos_dhcp role
+
+- name: Gather DHCP reservations from inventory
+  ansible.builtin.include_tasks: gather_hosts.yml
+
+- name: Configure VyOS DHCP server
+  ansible.builtin.include_tasks: configure_dhcp.yml

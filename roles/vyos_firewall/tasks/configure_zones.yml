@@ -1,0 +1,42 @@
+---
+# Configure VyOS firewall zones
+
+- name: Configure firewall zones
+  vyos.vyos.vyos_config:
+    lines:
+      - set firewall zone '{{ item.name }}' description '{{ item.description }}'
+      - set firewall zone '{{ item.name }}' default-action '{{ item.default_action }}'
+    save: true
+  loop: "{{ firewall_zones }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: save vyos config
+
+- name: Assign interfaces to zones
+  vyos.vyos.vyos_config:
+    lines:
+      - set firewall zone '{{ item.0.name }}' interface '{{ item.1 }}'
+    save: true
+  loop: "{{ firewall_zones | subelements('interfaces', skip_missing=true) }}"
+  loop_control:
+    label: "{{ item.0.name }} <- {{ item.1 }}"
+  when: item.0.interfaces | length > 0
+  notify: save vyos config
+
+- name: Configure local zone for router itself
+  vyos.vyos.vyos_config:
+    lines:
+      - set firewall zone LOCAL local-zone
+      - set firewall zone LOCAL default-action drop
+    save: true
+  notify: save vyos config
+
+- name: Allow established/related traffic to LOCAL
+  vyos.vyos.vyos_config:
+    lines:
+      - set firewall ipv4 name ALLOW_ESTABLISHED default-action drop
+      - set firewall ipv4 name ALLOW_ESTABLISHED rule 10 action accept
+      - set firewall ipv4 name ALLOW_ESTABLISHED rule 10 state established
+      - set firewall ipv4 name ALLOW_ESTABLISHED rule 10 state related
+    save: true
+  notify: save vyos config

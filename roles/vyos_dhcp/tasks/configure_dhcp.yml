@@ -1,0 +1,42 @@
+---
+# Configure VyOS DHCP server
+
+- name: Configure DHCP subnets
+  vyos.vyos.vyos_config:
+    lines:
+      - set service dhcp-server shared-network-name '{{ item.name }}' subnet '{{ item.subnet }}' subnet-id '{{ idx + 1 }}'
+      - set service dhcp-server shared-network-name '{{ item.name }}' subnet '{{ item.subnet }}' option default-router '{{ item.gateway }}'
+      - set service dhcp-server shared-network-name '{{ item.name }}' subnet '{{ item.subnet }}' option domain-name '{{ dhcp_domain }}'
+      - set service dhcp-server shared-network-name '{{ item.name }}' subnet '{{ item.subnet }}' option name-server '{{ dhcp_dns_servers | first }}'
+      - set service dhcp-server shared-network-name '{{ item.name }}' subnet '{{ item.subnet }}' lease '{{ dhcp_default_lease }}'
+      - set service dhcp-server shared-network-name '{{ item.name }}' subnet '{{ item.subnet }}' range 0 start '{{ item.range_start }}'
+      - set service dhcp-server shared-network-name '{{ item.name }}' subnet '{{ item.subnet }}' range 0 stop '{{ item.range_end }}'
+    save: true
+  loop: "{{ dhcp_subnets }}"
+  loop_control:
+    index_var: idx
+    label: "{{ item.name }} ({{ item.subnet }})"
+  when: dhcp_subnets | length > 0
+  notify: save vyos config
+
+- name: Configure DHCP static mappings
+  vyos.vyos.vyos_config:
+    lines:
+      - set service dhcp-server shared-network-name '{{ _subnet_name }}' subnet '{{ _subnet }}' static-mapping '{{ item.hostname }}' mac '{{ item.mac }}'
+      - set service dhcp-server shared-network-name '{{ _subnet_name }}' subnet '{{ _subnet }}' static-mapping '{{ item.hostname }}' ip-address '{{ item.ip }}'
+    save: true
+  loop: "{{ dhcp_static_mappings }}"
+  loop_control:
+    label: "{{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
+  vars:
+    _subnet: "{{ item.ip | ansible.utils.ipaddr('network/prefix') }}"
+    _subnet_name: >-
+      {{
+        dhcp_subnets
+        | selectattr('subnet', 'equalto', _subnet)
+        | map(attribute='name')
+        | first
+        | default('default')
+      }}
+  when: dhcp_static_mappings | length > 0
+  notify: save vyos config

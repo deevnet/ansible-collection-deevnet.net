@@ -1,0 +1,8 @@
+---
+# Main entry point for vyos_dns role
+
+- name: Gather DNS records from inventory
+  ansible.builtin.include_tasks: gather_hosts.yml
+
+- name: Configure VyOS DNS forwarding
+  ansible.builtin.include_tasks: configure_dns.yml

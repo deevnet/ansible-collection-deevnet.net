@@ -1,0 +1,53 @@
+---
+# VyOS Router Configuration Playbook
+#
+# Configures VyOS router with:
+# - DNS forwarding with static host entries from inventory
+# - DHCP server with static mappings from inventory
+# - Zone-based firewall with NAT
+#
+# Usage:
+#   ansible-playbook playbooks/vyos-site.yml -i <inventory>
+#
+# Prerequisites:
+#   - VyOS router accessible via SSH
+#   - vyos.vyos collection installed
+#   - Inventory with host definitions and VyOS router in 'vyos_routers' group
+
+- name: Configure VyOS Router
+  hosts: vyos_routers
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+  vars:
+    ansible_network_os: vyos.vyos.vyos
+    ansible_user: vyos
+    ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+
+  tasks:
+    - name: Gather VyOS facts
+      vyos.vyos.vyos_facts:
+        gather_subset:
+          - config
+
+    - name: Display VyOS version
+      ansible.builtin.debug:
+        msg: "VyOS version: {{ ansible_net_version | default('unknown') }}"
+
+  roles:
+    - role: vyos_dns
+      tags: [dns]
+
+    - role: vyos_dhcp
+      tags: [dhcp]
+
+    - role: vyos_firewall
+      tags: [firewall]
+
+  post_tasks:
+    - name: Save configuration
+      vyos.vyos.vyos_config:
+        save: true
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: "VyOS router configuration complete"

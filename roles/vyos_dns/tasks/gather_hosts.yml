@@ -1,0 +1,40 @@
+---
+# Build DNS host records from inventory
+# Reads from env.interfaces.<name>.dns flags on each host
+
+- name: Initialize DNS record lists
+  ansible.builtin.set_fact:
+    dns_host_records: []
+
+- name: Build host A records from inventory
+  ansible.builtin.set_fact:
+    dns_host_records: >-
+      {{
+        dns_host_records + [{
+          'hostname': item,
+          'ip': _dns_ip,
+          'fqdn': item + '.' + dns_domain
+        }]
+      }}
+  loop: "{{ groups['all'] }}"
+  when:
+    - hostvars[item]['env'] is defined
+    - hostvars[item]['env']['interfaces'] is defined
+    - _dns_ip is defined
+    - _dns_ip not in ['dhcp', 'null', none, '']
+  vars:
+    _interfaces: "{{ hostvars[item]['env']['interfaces'] | dict2items }}"
+    _dns_interface: >-
+      {{
+        _interfaces
+        | selectattr('value.dns', 'defined')
+        | selectattr('value.dns.host_a_record', 'defined')
+        | selectattr('value.dns.host_a_record', 'equalto', true)
+        | first
+        | default({})
+      }}
+    _dns_ip: "{{ _dns_interface.value.ip | default(none) }}"
+
+- name: Display host records to be configured
+  ansible.builtin.debug:
+    msg: "DNS records: {{ dns_host_records | map(attribute='hostname') | list }}"

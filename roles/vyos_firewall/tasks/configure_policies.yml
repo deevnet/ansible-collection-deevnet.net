@@ -1,0 +1,25 @@
+---
+# Configure VyOS zone-to-zone firewall policies
+
+- name: Create zone-to-zone firewall rules
+  vyos.vyos.vyos_config:
+    lines:
+      - set firewall ipv4 name '{{ item.from_zone }}-to-{{ item.to_zone }}' default-action '{{ item.action | default("drop") }}'
+      - set firewall ipv4 name '{{ item.from_zone }}-to-{{ item.to_zone }}' rule 10 action accept
+      - set firewall ipv4 name '{{ item.from_zone }}-to-{{ item.to_zone }}' rule 10 state established
+      - set firewall ipv4 name '{{ item.from_zone }}-to-{{ item.to_zone }}' rule 10 state related
+    save: true
+  loop: "{{ firewall_zone_policies }}"
+  loop_control:
+    label: "{{ item.from_zone }} -> {{ item.to_zone }}"
+  notify: save vyos config
+
+- name: Apply zone-to-zone policies
+  vyos.vyos.vyos_config:
+    lines:
+      - set firewall zone '{{ item.from_zone }}' from '{{ item.to_zone }}' firewall name '{{ item.from_zone }}-to-{{ item.to_zone }}'
+    save: true
+  loop: "{{ firewall_zone_policies }}"
+  loop_control:
+    label: "{{ item.from_zone }} -> {{ item.to_zone }}"
+  notify: save vyos config

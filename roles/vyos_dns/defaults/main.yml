@@ -1,0 +1,27 @@
+---
+# VyOS DNS role defaults
+
+# Domain for this substrate
+dns_domain: "dvntm.deevnet.net"
+
+# Upstream DNS servers for forwarding
+dns_upstream_servers:
+  - "1.1.1.1"
+  - "8.8.8.8"
+
+# Listen address for DNS forwarding (LAN interface IP)
+dns_listen_address: "{{ ansible_host }}"
+
+# Cache size (entries)
+dns_cache_size: 1000
+
+# Allow DNS queries from these networks
+dns_allow_from:
+  - "192.168.10.0/24"
+  - "192.168.20.0/24"
+  - "192.168.30.0/24"
+  - "192.168.40.0/24"
+  - "192.168.99.0/24"
+
+# Host records will be built from inventory
+dns_host_records: []

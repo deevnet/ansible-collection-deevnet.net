@@ -1,0 +1,38 @@
+---
+# Configure VyOS DNS forwarding service
+
+- name: Configure DNS forwarding base settings
+  vyos.vyos.vyos_config:
+    lines:
+      - set service dns forwarding cache-size '{{ dns_cache_size }}'
+      - set service dns forwarding listen-address '{{ dns_listen_address }}'
+      - set service dns forwarding domain '{{ dns_domain }}' addnta
+    save: true
+  notify: save vyos config
+
+- name: Configure upstream DNS servers
+  vyos.vyos.vyos_config:
+    lines:
+      - set service dns forwarding name-server '{{ item }}'
+    save: true
+  loop: "{{ dns_upstream_servers }}"
+  notify: save vyos config
+
+- name: Configure allowed networks
+  vyos.vyos.vyos_config:
+    lines:
+      - set service dns forwarding allow-from '{{ item }}'
+    save: true
+  loop: "{{ dns_allow_from }}"
+  notify: save vyos config
+
+- name: Configure static host entries
+  vyos.vyos.vyos_config:
+    lines:
+      - set system static-host-mapping host-name '{{ item.fqdn }}' inet '{{ item.ip }}'
+    save: true
+  loop: "{{ dns_host_records }}"
+  loop_control:
+    label: "{{ item.hostname }} -> {{ item.ip }}"
+  when: dns_host_records | length > 0
+  notify: save vyos config

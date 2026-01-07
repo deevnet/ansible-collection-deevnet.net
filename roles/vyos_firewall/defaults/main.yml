@@ -1,0 +1,50 @@
+---
+# VyOS Firewall role defaults
+
+# Firewall zones definition
+# Each zone maps to network segments
+firewall_zones:
+  - name: WAN
+    description: "External/upstream network"
+    default_action: drop
+    interfaces: []
+  - name: TRUSTED
+    description: "Trusted user devices"
+    default_action: accept
+    interfaces: []
+  - name: MGMT
+    description: "Infrastructure management"
+    default_action: accept
+    interfaces: []
+  - name: IOT
+    description: "IoT devices"
+    default_action: drop
+    interfaces: []
+  - name: GUEST
+    description: "Guest network"
+    default_action: drop
+    interfaces: []
+
+# Zone policy matrix
+# Defines what traffic is allowed between zones
+firewall_zone_policies: []
+# Example:
+#   - from_zone: TRUSTED
+#     to_zone: WAN
+#     action: accept
+#   - from_zone: IOT
+#     to_zone: WAN
+#     action: accept
+
+# Enable NAT masquerade on WAN
+firewall_enable_nat: true
+firewall_nat_outbound_interface: "eth0"
+
+# Basic firewall rules
+firewall_rules: []
+# Example:
+#   - name: allow-ssh
+#     zone: MGMT
+#     action: accept
+#     protocol: tcp
+#     destination_port: 22

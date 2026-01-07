@@ -1,0 +1,13 @@
+---
+# Main entry point for vyos_firewall role
+
+- name: Configure firewall zones
+  ansible.builtin.include_tasks: configure_zones.yml
+
+- name: Configure NAT
+  ansible.builtin.include_tasks: configure_nat.yml
+  when: firewall_enable_nat | bool
+
+- name: Configure zone policies
+  ansible.builtin.include_tasks: configure_policies.yml
+  when: firewall_zone_policies | length > 0

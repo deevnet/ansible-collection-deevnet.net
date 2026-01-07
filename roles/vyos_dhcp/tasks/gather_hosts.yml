@@ -1,0 +1,44 @@
+---
+# Build DHCP static mappings from inventory
+# Reads from env.interfaces.<name>.mac and env.interfaces.<name>.ip
+
+- name: Initialize DHCP static mappings list
+  ansible.builtin.set_fact:
+    dhcp_static_mappings: []
+
+- name: Build DHCP static mappings from inventory
+  ansible.builtin.set_fact:
+    dhcp_static_mappings: >-
+      {{
+        dhcp_static_mappings + [{
+          'hostname': item,
+          'mac': _dhcp_mac | upper,
+          'ip': _dhcp_ip,
+          'subnet': _dhcp_subnet
+        }]
+      }}
+  loop: "{{ groups['all'] }}"
+  when:
+    - hostvars[item]['env'] is defined
+    - hostvars[item]['env']['interfaces'] is defined
+    - _dhcp_mac is defined
+    - _dhcp_mac not in ['', none]
+    - _dhcp_ip is defined
+    - _dhcp_ip not in ['dhcp', 'null', none, '']
+  vars:
+    _interfaces: "{{ hostvars[item]['env']['interfaces'] | dict2items }}"
+    _dhcp_interface: >-
+      {{
+        _interfaces
+        | selectattr('value.mac', 'defined')
+        | selectattr('value.ip', 'defined')
+        | first
+        | default({})
+      }}
+    _dhcp_mac: "{{ _dhcp_interface.value.mac | default(none) }}"
+    _dhcp_ip: "{{ _dhcp_interface.value.ip | default(none) }}"
+    _dhcp_subnet: "{{ _dhcp_ip | ansible.utils.ipaddr('network/prefix') | default('unknown') }}"
+
+- name: Display DHCP static mappings to be configured
+  ansible.builtin.debug:
+    msg: "DHCP reservations: {{ dhcp_static_mappings | map(attribute='hostname') | list }}"

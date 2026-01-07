@@ -1,0 +1,6 @@
+---
+# Handlers for vyos_firewall role
+
+- name: save vyos config
+  vyos.vyos.vyos_config:
+    save: true

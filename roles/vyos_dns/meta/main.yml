@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: deevnet
+  description: Configure VyOS DNS forwarding from inventory
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: VyOS
+      versions:
+        - "1.4"
+        - "1.5"
+        - rolling
+
+dependencies:
+  - role: vyos.vyos
