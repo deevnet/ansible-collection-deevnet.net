@@ -93,6 +93,9 @@
         ip_address: "{{ item.ip }}"
         hostname: "{{ item.hostname }}"
         description: "{{ item.description }}"
+        option_data:
+          tftp_server_name: "{{ item.pxe_tftp_server | default('') }}"
+          boot_file_name: "{{ item.pxe_boot_file | default('') }}"
     status_code: [200, 201]
   loop: "{{ reservations_to_add }}"
   loop_control:
@@ -120,14 +123,15 @@
         ip_address: "{{ item.ip }}"
         hostname: "{{ item.hostname }}"
         description: "{{ item.description }}"
+        option_data:
+          tftp_server_name: "{{ item.pxe_tftp_server | default('') }}"
+          boot_file_name: "{{ item.pxe_boot_file | default('') }}"
     status_code: [200, 201]
   loop: "{{ reservations_to_update }}"
   loop_control:
     label: "Updating: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
   when:
     - reservations_to_update | length > 0
-    - existing_maps_by_mac[item.mac].ip != item.ip or
-      existing_maps_by_mac[item.mac].hostname != item.hostname
   register: update_results
   delegate_to: localhost
   changed_when: true

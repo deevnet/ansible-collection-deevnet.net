@@ -1,5 +1,5 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
-        dns dhcp list clean-deps clean-project deep-clean all
+        dns dhcp vyos list clean-deps clean-project deep-clean all
 
 # ---------- Config ----------
 COLLECTION_NAME ?= deevnet-net
@@ -19,11 +19,11 @@ help:
 "Targets:" \
 "" \
 "  deps" \
-"      Install Galaxy dependency collections at the user level (~/.ansible/collections)" \
-"      Only runs when collections/requirements.yml changes" \
+"      Install Python packages (requirements.txt) and Galaxy collections (~/.ansible/collections)" \
+"      Only runs when requirements files change" \
 "" \
 "  deps-force" \
-"      Force reinstall Galaxy dependency collections at the user level" \
+"      Force reinstall Python packages and Galaxy collections" \
 "" \
 "  build" \
 "      Build the local collection into a versioned .tar.gz artifact" \
@@ -46,6 +46,9 @@ help:
 "  dhcp" \
 "      Configure OPNsense DHCP static reservations (requires OPNSENSE_API_KEY and OPNSENSE_API_SECRET env vars)" \
 "" \
+"  vyos" \
+"      Configure VyOS routers (DNS, DHCP, firewall)" \
+"" \
 "  list" \
 "      Show installed collections in project and user paths" \
 "" \
@@ -59,13 +62,15 @@ help:
 "      Remove project + user collections and deps stamp"
 
 # ---------- Deps ----------
-$(DEPS_STAMP): $(REQS)
+$(DEPS_STAMP): $(REQS) requirements.txt
+	python3 -m pip install --user -q -r requirements.txt
 	ansible-galaxy collection install -r "$(REQS)" -p "$(USER_COLLECTIONS_PATH)"
 	touch "$(DEPS_STAMP)"
 
 deps: $(DEPS_STAMP)
 
 deps-force:
+	python3 -m pip install --user -q -r requirements.txt
 	ansible-galaxy collection install -r "$(REQS)" --force -p "$(USER_COLLECTIONS_PATH)"
 	touch "$(DEPS_STAMP)"
 
@@ -109,6 +114,10 @@ dhcp: install-dev
 	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/dhcp.yml
+
+vyos: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/vyos-site.yml
 
 # ---------- Inspection ----------
 list:

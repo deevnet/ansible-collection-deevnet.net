@@ -11,5 +11,5 @@ galaxy_info:
         - "1.5"
         - rolling
 
-dependencies:
-  - role: vyos.vyos
+dependencies: []
+# Note: vyos.vyos collection is installed via collections/requirements.yml

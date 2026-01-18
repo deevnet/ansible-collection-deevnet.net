@@ -4,6 +4,8 @@
 #   infrastructure.interfaces.<name>.mac
 #   env.interfaces.<name>.ip
 #   env.interfaces.<name>.dns.dhcp_reservation
+#   env.interfaces.<name>.dns.pxe_boot.tftp_server (optional)
+#   env.interfaces.<name>.dns.pxe_boot.boot_file (optional)
 
 - name: Initialize DHCP reservation lists
   ansible.builtin.set_fact:
@@ -19,7 +21,9 @@
           'mac': _mac | upper,
           'ip': _ip,
           'interface': _interface_name,
-          'description': dhcp_description_prefix ~ ' - ' ~ item ~ ' (' ~ _interface_name ~ ')'
+          'description': dhcp_description_prefix ~ ' - ' ~ item ~ ' (' ~ _interface_name ~ ')',
+          'pxe_tftp_server': _pxe_tftp_server,
+          'pxe_boot_file': _pxe_boot_file
         }]
       }}
   loop: "{{ groups['all'] }}"
@@ -49,6 +53,10 @@
     _interface_name: "{{ _dhcp_interface.key | default('') }}"
     _ip: "{{ _dhcp_interface.value.ip | default(none) }}"
     _mac: "{{ _infra_interfaces[_interface_name].mac | default('') if _interface_name and _interface_name in _infra_interfaces else '' }}"
+    # PXE boot options (optional)
+    _pxe_boot: "{{ _dhcp_interface.value.dns.pxe_boot | default({}) }}"
+    _pxe_tftp_server: "{{ _pxe_boot.tftp_server | default('') }}"
+    _pxe_boot_file: "{{ _pxe_boot.boot_file | default('') }}"
 
 - name: Build list of MACs to remove (dhcp_reservation is false)
   ansible.builtin.set_fact:
