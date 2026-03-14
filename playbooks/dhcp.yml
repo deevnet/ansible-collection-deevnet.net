@@ -1,10 +1,9 @@
 ---
 # Configure OPNsense DHCP for substrate
 #
+# Secrets are vaulted in inventory (group_vars/routers/vault.yml).
 # Usage:
-#   export OPNSENSE_API_KEY="your-key"
-#   export OPNSENSE_API_SECRET="your-secret"
-#   ansible-playbook playbooks/dhcp.yml
+#   ansible-playbook playbooks/dhcp.yml --ask-vault-pass
 
 - name: Configure OPNsense DHCP
   hosts: dhcp_servers

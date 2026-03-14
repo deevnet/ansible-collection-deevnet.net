@@ -4,11 +4,9 @@
 # Applies full VLAN configuration (VLANs, trunks, access ports) to switches.
 # Use for day-2 operations after initial migration is complete.
 #
+# Secrets are vaulted in inventory (group_vars/switches/vault.yml).
 # Usage:
-#   export SWITCH_USER="admin"
-#   export SWITCH_PASSWORD="password"
-#   export SWITCH_ENABLE_PASSWORD="enable-password"
-#   make switch
+#   make switch    # prompts for vault password
 
 - name: Configure switch VLANs
   hosts: switches

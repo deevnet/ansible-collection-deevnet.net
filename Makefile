@@ -44,16 +44,16 @@ help:
 "      deps + install-dev" \
 "" \
 "  dns" \
-"      Configure OPNsense DNS (requires OPNSENSE_API_KEY and OPNSENSE_API_SECRET env vars)" \
+"      Configure OPNsense DNS (secrets vaulted in inventory, prompts for vault password)" \
 "" \
 "  dhcp" \
-"      Configure OPNsense DHCP static reservations (requires OPNSENSE_API_KEY and OPNSENSE_API_SECRET env vars)" \
+"      Configure OPNsense DHCP static reservations (secrets vaulted in inventory, prompts for vault password)" \
 "" \
 "  vyos" \
 "      Configure VyOS routers (DNS, DHCP, firewall)" \
 "" \
 "  switch" \
-"      Configure switch VLANs (requires SWITCH_USER, SWITCH_PASSWORD, SWITCH_ENABLE_PASSWORD)" \
+"      Configure switch VLANs (secrets vaulted in inventory, prompts for vault password)" \
 "" \
 "  migration-opnsense-vlans    Phase 1: Create VLAN interfaces on OPNsense" \
 "  migration-switch-vlans      Phase 2: Create VLANs in switch database" \
@@ -113,20 +113,12 @@ publish: deps install-user
 	@echo "Published $(COLLECTION_NAME) to $(USER_COLLECTIONS_PATH)"
 
 dns: install-dev
-	@if [ -z "$$OPNSENSE_API_KEY" ] || [ -z "$$OPNSENSE_API_SECRET" ]; then \
-		echo "Error: OPNSENSE_API_KEY and OPNSENSE_API_SECRET must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/dns.yml
+	  ansible-playbook playbooks/dns.yml --ask-vault-pass
 
 dhcp: install-dev
-	@if [ -z "$$OPNSENSE_API_KEY" ] || [ -z "$$OPNSENSE_API_SECRET" ]; then \
-		echo "Error: OPNSENSE_API_KEY and OPNSENSE_API_SECRET must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/dhcp.yml
+	  ansible-playbook playbooks/dhcp.yml --ask-vault-pass
 
 vyos: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
@@ -153,60 +145,32 @@ deep-clean: clean-project
 
 # ---------- Switch ----------
 switch: deps install-dev
-	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
-		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/switch-vlans.yml
+	  ansible-playbook playbooks/switch-vlans.yml --ask-vault-pass
 
 # ---------- Migration (run in sequence, see migration runbook) ----------
 migration-opnsense-vlans: deps install-dev
-	@if [ -z "$$OPNSENSE_API_KEY" ] || [ -z "$$OPNSENSE_API_SECRET" ]; then \
-		echo "Error: OPNSENSE_API_KEY and OPNSENSE_API_SECRET must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml
+	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml --ask-vault-pass
 
 migration-switch-vlans: deps install-dev
-	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
-		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/02-switch-vlans.yml
+	  ansible-playbook playbooks/migration/02-switch-vlans.yml --ask-vault-pass
 
 migration-switch-trunk: deps install-dev
-	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
-		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/03-switch-trunk.yml
+	  ansible-playbook playbooks/migration/03-switch-trunk.yml --ask-vault-pass
 
 migration-switch-test-port: deps install-dev
-	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
-		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/04-switch-test-port.yml
+	  ansible-playbook playbooks/migration/04-switch-test-port.yml --ask-vault-pass
 
 migration-opnsense-dhcp: deps install-dev
-	@if [ -z "$$OPNSENSE_API_KEY" ] || [ -z "$$OPNSENSE_API_SECRET" ]; then \
-		echo "Error: OPNSENSE_API_KEY and OPNSENSE_API_SECRET must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml
+	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml --ask-vault-pass
 
 migration-switch-access-ports: deps install-dev
-	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
-		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
-		exit 1; \
-	fi
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/06-switch-access-ports.yml
+	  ansible-playbook playbooks/migration/06-switch-access-ports.yml --ask-vault-pass
 
 all: rebuild dns dhcp
