@@ -1,0 +1,29 @@
+---
+# Main entry point for switch_vlans role
+#
+# Configures VLANs and port assignments on TP-Link switches via Cisco CLI.
+# Input variables:
+#   deevnet_vlans: dict of VLAN definitions (from group_vars/all/vlans.yml)
+#   switch_ports: dict with trunk/access port definitions (from host_vars/<switch>.yml)
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - deevnet_vlans is defined
+      - deevnet_vlans | length > 0
+      - switch_ports is defined
+    fail_msg: >-
+      Required variables missing. Ensure deevnet_vlans is defined in
+      group_vars/all/vlans.yml and switch_ports in host_vars/<switch>.yml.
+
+- name: Configure VLANs
+  ansible.builtin.include_tasks: configure_vlans.yml
+  tags: [vlans]
+
+- name: Configure trunk ports
+  ansible.builtin.include_tasks: configure_trunk_ports.yml
+  tags: [trunk]
+
+- name: Configure access ports
+  ansible.builtin.include_tasks: configure_access_ports.yml
+  tags: [access]

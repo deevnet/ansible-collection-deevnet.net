@@ -1,0 +1,13 @@
+---
+# switch_vlans role defaults
+
+# VLAN definitions - expected from group_vars/all/vlans.yml
+# deevnet_vlans: {}
+
+# Port definitions - expected from host_vars/<switch>.yml
+# switch_ports:
+#   trunk: []
+#   access: []
+
+# Native VLAN for trunk ports (untagged traffic)
+switch_trunk_native_vlan: 99

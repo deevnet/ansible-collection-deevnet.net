@@ -1,0 +1,28 @@
+---
+# Configure access ports with VLAN assignments
+
+- name: Configure access ports
+  ansible.netcommon.cli_config:
+    config: |
+      {% for port in switch_ports.access | default([]) %}
+      interface {{ port.interface }}
+        switchport mode access
+        switchport access vlan {{ port.vlan_id }}
+        description {{ port.description | default('') }}
+        no shutdown
+      {% endfor %}
+  when: switch_ports.access | default([]) | length > 0
+  notify: write memory
+  register: access_result
+
+- name: Show access port assignments
+  ansible.netcommon.cli_command:
+    command: "show vlan brief"
+  register: access_output
+  when: switch_ports.access | default([]) | length > 0
+
+- name: Display port VLAN assignments
+  ansible.builtin.debug:
+    msg: "{{ access_output.stdout_lines | default([]) }}"
+    verbosity: 1
+  when: access_output is defined and access_output is not skipped

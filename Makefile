@@ -1,5 +1,8 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
-        dns dhcp vyos list clean-deps clean-project deep-clean all
+        dns dhcp vyos switch \
+        migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
+        migration-switch-test-port migration-opnsense-dhcp migration-switch-access-ports \
+        list clean-deps clean-project deep-clean all
 
 # ---------- Config ----------
 COLLECTION_NAME ?= deevnet-net
@@ -48,6 +51,16 @@ help:
 "" \
 "  vyos" \
 "      Configure VyOS routers (DNS, DHCP, firewall)" \
+"" \
+"  switch" \
+"      Configure switch VLANs (requires SWITCH_USER, SWITCH_PASSWORD, SWITCH_ENABLE_PASSWORD)" \
+"" \
+"  migration-opnsense-vlans    Phase 1: Create VLAN interfaces on OPNsense" \
+"  migration-switch-vlans      Phase 2: Create VLANs in switch database" \
+"  migration-switch-trunk      Phase 3: Configure trunk uplink to router" \
+"  migration-switch-test-port  Phase 4: Move one port to test VLAN" \
+"  migration-opnsense-dhcp     Phase 5: Configure DHCP for new subnets" \
+"  migration-switch-access-ports Phase 6: Move remaining ports to VLANs" \
 "" \
 "  list" \
 "      Show installed collections in project and user paths" \
@@ -137,5 +150,63 @@ clean-project:
 deep-clean: clean-project
 	rm -rf "$(USER_COLLECTIONS_PATH)"
 	rm -f "$(DEPS_STAMP)"
+
+# ---------- Switch ----------
+switch: deps install-dev
+	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
+		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/switch-vlans.yml
+
+# ---------- Migration (run in sequence, see migration runbook) ----------
+migration-opnsense-vlans: deps install-dev
+	@if [ -z "$$OPNSENSE_API_KEY" ] || [ -z "$$OPNSENSE_API_SECRET" ]; then \
+		echo "Error: OPNSENSE_API_KEY and OPNSENSE_API_SECRET must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml
+
+migration-switch-vlans: deps install-dev
+	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
+		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/02-switch-vlans.yml
+
+migration-switch-trunk: deps install-dev
+	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
+		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/03-switch-trunk.yml
+
+migration-switch-test-port: deps install-dev
+	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
+		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/04-switch-test-port.yml
+
+migration-opnsense-dhcp: deps install-dev
+	@if [ -z "$$OPNSENSE_API_KEY" ] || [ -z "$$OPNSENSE_API_SECRET" ]; then \
+		echo "Error: OPNSENSE_API_KEY and OPNSENSE_API_SECRET must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml
+
+migration-switch-access-ports: deps install-dev
+	@if [ -z "$$SWITCH_USER" ] || [ -z "$$SWITCH_PASSWORD" ] || [ -z "$$SWITCH_ENABLE_PASSWORD" ]; then \
+		echo "Error: SWITCH_USER, SWITCH_PASSWORD, and SWITCH_ENABLE_PASSWORD must be set"; \
+		exit 1; \
+	fi
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/06-switch-access-ports.yml
 
 all: rebuild dns dhcp

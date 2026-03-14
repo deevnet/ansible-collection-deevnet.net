@@ -1,0 +1,103 @@
+---
+# Create VLAN tags on OPNsense via /api/interfaces/vlan_settings/
+#
+# Strategy:
+#   1. Fetch current VLANs from API
+#   2. Build mapping of VLAN tag -> UUID for existing VLANs
+#   3. For each desired VLAN:
+#      - If tag exists on parent: skip (idempotent)
+#      - If tag does not exist: create via addItem
+#   4. Reconfigure interfaces to apply
+
+# Step 1: Get current VLANs
+- name: Get current VLAN configuration
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/vlan_settings/searchItem"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: existing_vlans
+  delegate_to: localhost
+
+- name: Display current VLAN count
+  ansible.builtin.debug:
+    msg: "Found {{ existing_vlans.json.rows | default([]) | length }} existing VLANs"
+
+# Step 2: Build tag -> UUID mapping for existing VLANs on our parent interface
+- name: Build VLAN tag to UUID mapping
+  ansible.builtin.set_fact:
+    existing_vlans_by_tag: >-
+      {{
+        existing_vlans_by_tag | default({}) | combine({
+          (item.tag | string): {
+            'uuid': item.uuid,
+            'device': item.vlanif | default(''),
+            'description': item.description | default('')
+          }
+        })
+      }}
+  loop: "{{ existing_vlans.json.rows | default([]) }}"
+  loop_control:
+    label: "VLAN {{ item.tag | default('?') }} on {{ item.if | default('?') }}"
+  when:
+    - item.tag is defined
+    - item['if'] is defined
+
+- name: Ensure existing_vlans_by_tag is defined
+  ansible.builtin.set_fact:
+    existing_vlans_by_tag: {}
+  when: existing_vlans_by_tag is not defined
+
+# Step 3: Categorize VLANs for creation
+- name: Identify VLANs to create
+  ansible.builtin.set_fact:
+    vlans_to_create: >-
+      {{
+        deevnet_vlans | dict2items
+        | rejectattr('value.vlan_id', 'in', existing_vlans_by_tag.keys() | map('int') | list)
+        | list
+      }}
+
+- name: Display VLANs to create
+  ansible.builtin.debug:
+    msg: |
+      VLANs to create: {{ vlans_to_create | map(attribute='key') | list }}
+      VLANs already exist: {{ (deevnet_vlans | dict2items | length) - (vlans_to_create | length) }}
+
+# Step 4: Create new VLANs
+- name: Create VLAN sub-interfaces
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/vlan_settings/addItem"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      vlan:
+        if: "{{ opnsense_vlan_parent }}"
+        tag: "{{ item.value.vlan_id }}"
+        descr: "{{ item.key }}"
+    status_code: [200, 201]
+  loop: "{{ vlans_to_create }}"
+  loop_control:
+    label: "Creating VLAN {{ item.value.vlan_id }} ({{ item.key }})"
+  when: vlans_to_create | length > 0
+  register: create_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure interfaces
+
+- name: Report VLAN creation results
+  ansible.builtin.debug:
+    msg: |
+      VLAN creation complete:
+      - Created: {{ vlans_to_create | length }}
+      - Already existed: {{ (deevnet_vlans | dict2items | length) - (vlans_to_create | length) }}
+      - Parent interface: {{ opnsense_vlan_parent }}

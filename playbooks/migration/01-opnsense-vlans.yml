@@ -1,0 +1,16 @@
+---
+# Phase 1: Create VLAN interfaces on OPNsense
+#
+# Usage:
+#   export OPNSENSE_API_KEY="your-key"
+#   export OPNSENSE_API_SECRET="your-secret"
+#   make migration-opnsense-vlans
+#
+# Verify: OPNsense GUI -> Interfaces -> VLANs
+# Rollback: Delete VLAN interfaces via OPNsense GUI
+
+- name: "Migration Phase 1: Create OPNsense VLAN interfaces"
+  hosts: dns_servers
+  gather_facts: false
+  roles:
+    - opnsense_vlans

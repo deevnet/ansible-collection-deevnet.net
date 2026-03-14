@@ -1,0 +1,19 @@
+---
+# Phase 5: Configure DHCP for new VLAN subnets
+#
+# Configures Kea DHCP subnets and reservations for VLAN segments
+# that have DHCP enabled (trusted, iot, iot_vendor, guest).
+#
+# Usage:
+#   export OPNSENSE_API_KEY="your-key"
+#   export OPNSENSE_API_SECRET="your-secret"
+#   make migration-opnsense-dhcp
+#
+# Verify: OPNsense GUI -> Services -> Kea DHCP -> Subnets
+# Rollback: Delete DHCP subnets via OPNsense GUI
+
+- name: "Migration Phase 5: Configure OPNsense DHCP for VLAN subnets"
+  hosts: dhcp_servers
+  gather_facts: false
+  roles:
+    - opnsense_dhcp

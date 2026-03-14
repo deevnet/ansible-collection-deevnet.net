@@ -1,0 +1,6 @@
+---
+# Save running config to startup config
+
+- name: write memory
+  ansible.netcommon.cli_command:
+    command: "write memory"

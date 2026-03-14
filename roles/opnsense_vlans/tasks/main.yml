@@ -1,0 +1,29 @@
+---
+# Main entry point for opnsense_vlans role
+#
+# Creates VLAN sub-interfaces on OPNsense via REST API.
+# Input variables:
+#   deevnet_vlans: dict of VLAN definitions (from group_vars/all/vlans.yml)
+#   opnsense_vlan_parent: physical LAN interface name in OPNsense
+#   opnsense_api_key / opnsense_api_secret: API credentials
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - opnsense_api_key is defined
+      - opnsense_api_key | length > 0
+      - opnsense_api_secret is defined
+      - opnsense_api_secret | length > 0
+      - opnsense_vlan_parent is defined
+      - opnsense_vlan_parent | length > 0
+      - deevnet_vlans is defined
+      - deevnet_vlans | length > 0
+    fail_msg: >-
+      Required variables missing. Ensure opnsense_api_key, opnsense_api_secret,
+      opnsense_vlan_parent, and deevnet_vlans are set.
+
+- name: Configure VLAN sub-interfaces
+  ansible.builtin.include_tasks: configure_vlans.yml
+
+- name: Configure VLAN interface addresses
+  ansible.builtin.include_tasks: configure_interfaces.yml

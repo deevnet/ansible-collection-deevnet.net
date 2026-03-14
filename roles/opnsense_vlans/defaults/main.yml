@@ -1,0 +1,13 @@
+---
+# opnsense_vlans role defaults
+
+# OPNsense API settings (typically inherited from group_vars/routers.yml)
+opnsense_api_url: "https://{{ ansible_host }}/api"
+opnsense_validate_certs: false
+
+# Parent interface for VLAN sub-interfaces (physical LAN interface in OPNsense)
+# MUST be set in group_vars or host_vars — e.g., "igb1" or "em0"
+opnsense_vlan_parent: ""
+
+# VLAN definitions - expected from group_vars/all/vlans.yml
+# deevnet_vlans: {}

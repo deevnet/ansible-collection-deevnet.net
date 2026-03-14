@@ -1,0 +1,17 @@
+---
+# Ongoing switch VLAN management
+#
+# Applies full VLAN configuration (VLANs, trunks, access ports) to switches.
+# Use for day-2 operations after initial migration is complete.
+#
+# Usage:
+#   export SWITCH_USER="admin"
+#   export SWITCH_PASSWORD="password"
+#   export SWITCH_ENABLE_PASSWORD="enable-password"
+#   make switch
+
+- name: Configure switch VLANs
+  hosts: switches
+  gather_facts: false
+  roles:
+    - switch_vlans

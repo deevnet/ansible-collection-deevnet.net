@@ -1,0 +1,33 @@
+---
+# Configure trunk ports with allowed VLANs
+
+- name: Build allowed VLAN list
+  ansible.builtin.set_fact:
+    all_vlan_ids: "{{ deevnet_vlans | dict2items | map(attribute='value.vlan_id') | list | join(',') }}"
+
+- name: Configure trunk ports
+  ansible.netcommon.cli_config:
+    config: |
+      {% for port in switch_ports.trunk | default([]) %}
+      interface {{ port.interface }}
+        switchport mode trunk
+        switchport trunk allowed vlan {{ port.allowed_vlans | default(all_vlan_ids) }}
+        switchport trunk native vlan {{ port.native_vlan | default(switch_trunk_native_vlan) }}
+        description {{ port.description | default('trunk uplink') }}
+        no shutdown
+      {% endfor %}
+  when: switch_ports.trunk | default([]) | length > 0
+  notify: write memory
+  register: trunk_result
+
+- name: Show trunk port status
+  ansible.netcommon.cli_command:
+    command: "show interfaces trunk"
+  register: trunk_output
+  when: switch_ports.trunk | default([]) | length > 0
+
+- name: Display trunk status
+  ansible.builtin.debug:
+    msg: "{{ trunk_output.stdout_lines | default([]) }}"
+    verbosity: 1
+  when: trunk_output is defined and trunk_output is not skipped
