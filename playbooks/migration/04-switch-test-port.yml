@@ -4,11 +4,8 @@
 # Moves a single access port to validate end-to-end VLAN connectivity
 # before migrating remaining ports.
 #
-# Usage:
-#   export SWITCH_USER="admin"
-#   export SWITCH_PASSWORD="password"
-#   export SWITCH_ENABLE_PASSWORD="enable-password"
-#   make migration-switch-test-port
+# Usage: make migration-switch-test-port
+# Credentials come from inventory vault (group_vars/switches/vault.yml)
 #
 # Verify: Connect device to test port, check DHCP lease, ping gateway, ping internet
 # Rollback: switchport access vlan 1 on test port
@@ -34,4 +31,4 @@
   handlers:
     - name: write memory
       ansible.netcommon.cli_command:
-        command: "write memory"
+        command: "copy running-config startup-config"

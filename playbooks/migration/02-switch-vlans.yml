@@ -1,11 +1,8 @@
 ---
 # Phase 2: Create VLANs in switch VLAN database
 #
-# Usage:
-#   export SWITCH_USER="admin"
-#   export SWITCH_PASSWORD="password"
-#   export SWITCH_ENABLE_PASSWORD="enable-password"
-#   make migration-switch-vlans
+# Usage: make migration-switch-vlans
+# Credentials come from inventory vault (group_vars/switches/vault.yml)
 #
 # Verify: SSH to switch -> show vlan brief
 # Rollback: no vlan <id> for each created VLAN
@@ -23,4 +20,4 @@
   handlers:
     - name: write memory
       ansible.netcommon.cli_command:
-        command: "write memory"
+        command: "copy running-config startup-config"

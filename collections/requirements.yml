@@ -6,5 +6,3 @@ collections:
     version: ">=6.0.0"
   - name: ansible.netcommon
     version: ">=7.0.0"
-  - name: cisco.ios
-    version: ">=9.0.0"

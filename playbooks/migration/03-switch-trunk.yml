@@ -4,13 +4,10 @@
 # ⚠ RISK: If native VLAN is misconfigured, you may lose switch access.
 # Ensure console/OOB access is available before running.
 #
-# Usage:
-#   export SWITCH_USER="admin"
-#   export SWITCH_PASSWORD="password"
-#   export SWITCH_ENABLE_PASSWORD="enable-password"
-#   make migration-switch-trunk
+# Usage: make migration-switch-trunk
+# Credentials come from inventory vault (group_vars/switches/vault.yml)
 #
-# Verify: show interfaces trunk — native VLAN should be management (99)
+# Verify: show interface switchport gigabitEthernet 1/0/1 — native VLAN should be management (99)
 # Rollback: switchport mode access on uplink port
 
 - name: "Migration Phase 3: Configure switch trunk uplink"
@@ -26,4 +23,4 @@
   handlers:
     - name: write memory
       ansible.netcommon.cli_command:
-        command: "write memory"
+        command: "copy running-config startup-config"

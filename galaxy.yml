@@ -15,4 +15,3 @@ tags:
 dependencies:
   ansible.posix: ">=1.5.0"
   ansible.netcommon: ">=7.0.0"
-  cisco.ios: ">=9.0.0"

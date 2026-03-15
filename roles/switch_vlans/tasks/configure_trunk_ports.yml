@@ -22,7 +22,7 @@
 
 - name: Show trunk port status
   ansible.netcommon.cli_command:
-    command: "show interfaces trunk"
+    command: "show interface switchport {{ switch_ports.trunk[0].interface }}"
   register: trunk_output
   when: switch_ports.trunk | default([]) | length > 0
 

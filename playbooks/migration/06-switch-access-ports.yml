@@ -4,11 +4,8 @@
 # Moves all remaining switch ports to their assigned VLANs.
 # Run after DHCP is confirmed working on new subnets.
 #
-# Usage:
-#   export SWITCH_USER="admin"
-#   export SWITCH_PASSWORD="password"
-#   export SWITCH_ENABLE_PASSWORD="enable-password"
-#   make migration-switch-access-ports
+# Usage: make migration-switch-access-ports
+# Credentials come from inventory vault (group_vars/switches/vault.yml)
 #
 # Verify: Each device gets correct VLAN/IP, check show vlan brief
 # Rollback: switchport access vlan 1 on affected ports
@@ -26,4 +23,4 @@
   handlers:
     - name: write memory
       ansible.netcommon.cli_command:
-        command: "write memory"
+        command: "copy running-config startup-config"

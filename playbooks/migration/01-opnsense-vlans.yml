@@ -1,10 +1,8 @@
 ---
 # Phase 1: Create VLAN interfaces on OPNsense
 #
-# Usage:
-#   export OPNSENSE_API_KEY="your-key"
-#   export OPNSENSE_API_SECRET="your-secret"
-#   make migration-opnsense-vlans
+# Usage: make migration-opnsense-vlans
+# Credentials come from inventory vault (group_vars/routers/vault.yml)
 #
 # Verify: OPNsense GUI -> Interfaces -> VLANs
 # Rollback: Delete VLAN interfaces via OPNsense GUI

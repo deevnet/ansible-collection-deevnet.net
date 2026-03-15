@@ -149,6 +149,9 @@ switch: deps install-dev
 	  ansible-playbook playbooks/switch-vlans.yml --ask-vault-pass
 
 # ---------- Migration (run in sequence, see migration runbook) ----------
+# Migration targets use the default inventory (dvntm) which has target VLAN
+# definitions layered in with current host IPs. After migration completes,
+# dvntm-new (with target IPs) replaces dvntm (Phase 7).
 migration-opnsense-vlans: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml --ask-vault-pass

@@ -3,4 +3,4 @@
 
 - name: write memory
   ansible.netcommon.cli_command:
-    command: "write memory"
+    command: "copy running-config startup-config"

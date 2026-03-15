@@ -4,10 +4,8 @@
 # Configures Kea DHCP subnets and reservations for VLAN segments
 # that have DHCP enabled (trusted, iot, iot_vendor, guest).
 #
-# Usage:
-#   export OPNSENSE_API_KEY="your-key"
-#   export OPNSENSE_API_SECRET="your-secret"
-#   make migration-opnsense-dhcp
+# Usage: make migration-opnsense-dhcp
+# Credentials come from inventory vault (group_vars/routers/vault.yml)
 #
 # Verify: OPNsense GUI -> Services -> Kea DHCP -> Subnets
 # Rollback: Delete DHCP subnets via OPNsense GUI
