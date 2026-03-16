@@ -44,16 +44,16 @@ help:
 "      deps + install-dev" \
 "" \
 "  dns" \
-"      Configure OPNsense DNS (secrets vaulted in inventory, prompts for vault password)" \
+"      Configure OPNsense DNS (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
 "  dhcp" \
-"      Configure OPNsense DHCP static reservations (secrets vaulted in inventory, prompts for vault password)" \
+"      Configure OPNsense DHCP static reservations (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
 "  vyos" \
 "      Configure VyOS routers (DNS, DHCP, firewall)" \
 "" \
 "  switch" \
-"      Configure switch VLANs (secrets vaulted in inventory, prompts for vault password)" \
+"      Configure switch VLANs (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
 "  migration-opnsense-vlans    Phase 1: Create VLAN interfaces on OPNsense" \
 "  migration-switch-vlans      Phase 2: Create VLANs in switch database" \
@@ -114,11 +114,11 @@ publish: deps install-user
 
 dns: install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/dns.yml --ask-vault-pass
+	  ansible-playbook playbooks/dns.yml
 
 dhcp: install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/dhcp.yml --ask-vault-pass
+	  ansible-playbook playbooks/dhcp.yml
 
 vyos: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
@@ -146,7 +146,7 @@ deep-clean: clean-project
 # ---------- Switch ----------
 switch: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/switch-vlans.yml --ask-vault-pass
+	  ansible-playbook playbooks/switch-vlans.yml
 
 # ---------- Migration (run in sequence, see migration runbook) ----------
 # Migration targets use the default inventory (dvntm) which has target VLAN
@@ -154,26 +154,26 @@ switch: deps install-dev
 # dvntm-new (with target IPs) replaces dvntm (Phase 7).
 migration-opnsense-vlans: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml --ask-vault-pass
+	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml
 
 migration-switch-vlans: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/02-switch-vlans.yml --ask-vault-pass
+	  ansible-playbook playbooks/migration/02-switch-vlans.yml
 
 migration-switch-trunk: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/03-switch-trunk.yml --ask-vault-pass
+	  ansible-playbook playbooks/migration/03-switch-trunk.yml
 
 migration-switch-test-port: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/04-switch-test-port.yml --ask-vault-pass
+	  ansible-playbook playbooks/migration/04-switch-test-port.yml
 
 migration-opnsense-dhcp: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml --ask-vault-pass
+	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml
 
 migration-switch-access-ports: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/06-switch-access-ports.yml --ask-vault-pass
+	  ansible-playbook playbooks/migration/06-switch-access-ports.yml
 
 all: rebuild dns dhcp
