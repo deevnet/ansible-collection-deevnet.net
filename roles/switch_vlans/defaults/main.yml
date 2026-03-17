@@ -9,5 +9,5 @@
 #   trunk: []
 #   access: []
 
-# Native VLAN for trunk ports (untagged traffic)
-switch_trunk_native_vlan: 99
+# Native VLAN for trunk ports (blackhole — unrouted, drops untagged frames)
+switch_trunk_native_vlan: 999
