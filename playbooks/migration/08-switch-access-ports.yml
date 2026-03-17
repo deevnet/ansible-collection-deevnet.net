@@ -1,8 +1,8 @@
 ---
-# Phase 6: Migrate remaining access ports to VLANs
+# Phase 8: Migrate remaining access ports to VLANs
 #
 # Moves all remaining switch ports to their assigned VLANs.
-# Run after DHCP is confirmed working on new subnets.
+# Run after firewall rules are confirmed working on new subnets.
 #
 # Usage: make migration-switch-access-ports
 # Credentials come from inventory vault (group_vars/switches/vault.yml)
@@ -10,7 +10,7 @@
 # Verify: Each device gets correct VLAN/IP, check show vlan brief
 # Rollback: switchport access vlan 1 on affected ports
 
-- name: "Migration Phase 6: Migrate remaining access ports to VLANs"
+- name: "Migration Phase 8: Migrate remaining access ports to VLANs"
   hosts: switches
   gather_facts: false
   tasks:

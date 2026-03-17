@@ -1,0 +1,14 @@
+---
+# Apply firewall filter changes on OPNsense
+
+- name: apply firewall rules
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/filter/apply"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+  delegate_to: localhost

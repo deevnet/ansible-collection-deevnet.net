@@ -1,0 +1,23 @@
+---
+# opnsense_firewall role defaults
+
+# OPNsense API settings (typically inherited from group_vars/routers.yml)
+opnsense_api_url: "https://{{ ansible_host }}/api"
+opnsense_validate_certs: false
+
+# Prefix for managed rule descriptions (used for idempotency)
+firewall_managed_prefix: "ansible:"
+
+# Anti-lockout: always allow management subnet to router on 443/22
+firewall_anti_lockout: true
+
+# Sequence numbering for rule ordering
+firewall_sequence_start: 100
+firewall_sequence_step: 10
+
+# Expected from inventory
+firewall_zone_policies: []
+firewall_internet_zones: []
+
+# VLAN definitions — expected from group_vars/all/vlans.yml
+# deevnet_vlans: {}

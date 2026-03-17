@@ -1,0 +1,21 @@
+---
+# Configure OPNsense core router (full stack)
+#
+# Applies all OPNsense configuration in dependency order:
+#   1. VLANs + interface IPs
+#   2. Zone-based firewall rules
+#   3. DNS (Unbound)
+#   4. DHCP (Kea)
+#
+# Secrets are vaulted in inventory (group_vars/routers/vault.yml).
+# Usage:
+#   ansible-playbook playbooks/opnsense.yml --ask-vault-pass
+
+- name: Configure OPNsense core router (full stack)
+  hosts: dns_servers
+  gather_facts: false
+  roles:
+    - opnsense_vlans
+    - opnsense_firewall
+    - opnsense_dns
+    - opnsense_dhcp

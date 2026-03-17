@@ -1,0 +1,23 @@
+---
+# Migration Phase 6: Assign IP addresses to OPNsense VLAN interfaces
+#
+# After VLANs are created (Phase 1) and DHCP configured (Phase 5),
+# this step assigns gateway IPs to each VLAN interface and enables them.
+#
+# Prerequisites:
+#   - Phase 1 complete (VLAN sub-interfaces exist)
+#   - VLAN devices assigned to interface slots in OPNsense (Interfaces -> Assignments)
+#
+# Verify:
+#   OPNsense GUI -> Interfaces -> each VLAN interface shows correct IP
+#   From test port: ping the VLAN gateway IP
+
+- name: "Migration Phase 6: Assign IPs to OPNsense VLAN interfaces"
+  hosts: dns_servers
+  gather_facts: false
+  tasks:
+    - name: Configure VLAN interface addresses
+      ansible.builtin.include_role:
+        name: opnsense_vlans
+        tasks_from: configure_interfaces.yml
+      tags: [interfaces]

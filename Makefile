@@ -1,7 +1,9 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
-        dns dhcp vyos switch \
+        dns dhcp vyos switch opnsense \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
-        migration-switch-test-port migration-opnsense-dhcp migration-switch-access-ports \
+        migration-switch-test-port migration-opnsense-dhcp \
+        migration-opnsense-interfaces migration-opnsense-firewall \
+        migration-switch-access-ports \
         list clean-deps clean-project deep-clean all
 
 # ---------- Config ----------
@@ -55,12 +57,14 @@ help:
 "  switch" \
 "      Configure switch VLANs (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
-"  migration-opnsense-vlans    Phase 1: Create VLAN interfaces on OPNsense" \
-"  migration-switch-vlans      Phase 2: Create VLANs in switch database" \
-"  migration-switch-trunk      Phase 3: Configure trunk uplink to router" \
-"  migration-switch-test-port  Phase 4: Move one port to test VLAN" \
-"  migration-opnsense-dhcp     Phase 5: Configure DHCP for new subnets" \
-"  migration-switch-access-ports Phase 6: Move remaining ports to VLANs" \
+"  migration-opnsense-vlans       Phase 1: Create VLAN interfaces on OPNsense" \
+"  migration-switch-vlans        Phase 2: Create VLANs in switch database" \
+"  migration-switch-trunk        Phase 3: Configure trunk uplink to router" \
+"  migration-switch-test-port    Phase 4: Move one port to test VLAN" \
+"  migration-opnsense-dhcp       Phase 5: Configure DHCP for new subnets" \
+"  migration-opnsense-interfaces Phase 6: Assign IPs to VLAN interfaces" \
+"  migration-opnsense-firewall   Phase 7: Configure inter-VLAN firewall rules" \
+"  migration-switch-access-ports Phase 8: Move remaining ports to VLANs" \
 "" \
 "  list" \
 "      Show installed collections in project and user paths" \
@@ -120,6 +124,10 @@ dhcp: install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/dhcp.yml
 
+opnsense: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/opnsense.yml
+
 vyos: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/vyos-site.yml
@@ -172,8 +180,16 @@ migration-opnsense-dhcp: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml
 
+migration-opnsense-interfaces: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/06-opnsense-interfaces.yml
+
+migration-opnsense-firewall: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/07-opnsense-firewall.yml
+
 migration-switch-access-ports: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/06-switch-access-ports.yml
+	  ansible-playbook playbooks/migration/08-switch-access-ports.yml
 
 all: rebuild dns dhcp

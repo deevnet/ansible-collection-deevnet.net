@@ -1,0 +1,119 @@
+---
+# Discover OPNsense interface assignments for VLAN segments
+#
+# Builds a mapping of zone name -> OPNsense interface identifier by matching
+# VLAN device names (e.g., re0_vlan10) from the interfaces API.
+#
+# Output fact: zone_to_interface
+#   {
+#     "trusted": { "identifier": "opt1", "device": "re0_vlan10", "subnet": "10.20.10.0/24" },
+#     ...
+#   }
+
+# Step 1: Fetch VLAN list to get device names
+- name: Get VLAN configuration
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/vlan_settings/searchItem"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: fw_vlans
+  delegate_to: localhost
+
+# Step 2: Build VLAN tag -> device name mapping
+- name: Build VLAN tag to device mapping
+  ansible.builtin.set_fact:
+    fw_vlan_devices_by_tag: >-
+      {{
+        fw_vlan_devices_by_tag | default({}) | combine({
+          (item.tag | string): item.vlanif | default('')
+        })
+      }}
+  loop: "{{ fw_vlans.json.rows | default([]) }}"
+  loop_control:
+    label: "VLAN {{ item.tag | default('?') }} -> {{ item.vlanif | default('?') }}"
+  when:
+    - item.tag is defined
+    - item.vlanif is defined
+
+- name: Ensure fw_vlan_devices_by_tag is defined
+  ansible.builtin.set_fact:
+    fw_vlan_devices_by_tag: {}
+  when: fw_vlan_devices_by_tag is not defined
+
+# Step 3: Fetch interface assignments
+- name: Get interface assignments
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/overview/export"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: fw_interfaces
+  delegate_to: localhost
+
+# Step 4: Build device -> interface identifier mapping
+- name: Build device to interface mapping
+  ansible.builtin.set_fact:
+    fw_device_to_interface: >-
+      {{
+        fw_device_to_interface | default({}) | combine({
+          (item.value.device | default('')): {
+            'identifier': item.key,
+            'device': item.value.device | default('')
+          }
+        })
+      }}
+  loop: "{{ fw_interfaces.json | dict2items }}"
+  loop_control:
+    label: "{{ item.key }} -> {{ item.value.device | default('?') }}"
+  when:
+    - item.value.device is defined
+
+- name: Ensure fw_device_to_interface is defined
+  ansible.builtin.set_fact:
+    fw_device_to_interface: {}
+  when: fw_device_to_interface is not defined
+
+# Step 5: Build zone name -> interface identifier mapping
+- name: Build zone to interface mapping
+  ansible.builtin.set_fact:
+    zone_to_interface: >-
+      {{
+        zone_to_interface | default({}) | combine({
+          (item.key): {
+            'identifier': fw_device_to_interface[_device].identifier | default(''),
+            'device': _device,
+            'subnet': item.value.subnet | default('')
+          }
+        })
+      }}
+  vars:
+    _device: "{{ fw_vlan_devices_by_tag[item.value.vlan_id | string] | default('') }}"
+  loop: "{{ deevnet_vlans | dict2items }}"
+  loop_control:
+    label: "{{ item.key }} -> {{ fw_device_to_interface[_device].identifier | default('unmapped') }}"
+  when:
+    - item.value.vlan_id is defined
+    - item.value.subnet is defined
+    - _device | length > 0
+    - _device in fw_device_to_interface
+
+- name: Ensure zone_to_interface is defined
+  ansible.builtin.set_fact:
+    zone_to_interface: {}
+  when: zone_to_interface is not defined
+
+- name: Display zone to interface mapping
+  ansible.builtin.debug:
+    msg: "{{ item.key }}: {{ item.value.identifier }} ({{ item.value.device }})"
+  loop: "{{ zone_to_interface | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

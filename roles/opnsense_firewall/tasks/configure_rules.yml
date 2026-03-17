@@ -1,0 +1,316 @@
+---
+# Configure OPNsense firewall filter rules via API
+#
+# Strategy:
+#   1. Fetch current rules from the filter API
+#   2. Build mapping of managed rules (keyed by composite identifier)
+#   3. Build desired rules from zone policies, internet zones, and anti-lockout
+#   4. Categorize into add / update / delete
+#   5. Execute changes via addRule / setRule / delRule
+#   6. Notify handler to apply
+
+# Step 1: Fetch current firewall rules
+- name: Get current firewall rules
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/filter/searchRule"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      current: 1
+      rowCount: -1
+      sort: {}
+      searchPhrase: "{{ firewall_managed_prefix }}"
+    return_content: true
+  register: current_rules
+  delegate_to: localhost
+
+- name: Display current managed rules count
+  ansible.builtin.debug:
+    msg: "Found {{ current_rules.json.rows | default([]) | length }} existing managed firewall rules"
+
+# Step 2: Build existing rules mapping keyed by description
+- name: Build existing rules by description
+  ansible.builtin.set_fact:
+    existing_rules_by_desc: >-
+      {{
+        existing_rules_by_desc | default({}) | combine({
+          (item.description | default('')): {
+            'uuid': item.uuid,
+            'enabled': item.enabled | default('0') | string,
+            'action': item.action | default(''),
+            'interface': item.interface | default(''),
+            'direction': item.direction | default(''),
+            'protocol': item.ipprotocol | default(''),
+            'source_net': item.source_net | default(''),
+            'destination_net': item.destination_net | default(''),
+            'destination_port': item.destination_port | default('')
+          }
+        })
+      }}
+  loop: "{{ current_rules.json.rows | default([]) }}"
+  loop_control:
+    label: "{{ item.description | default('?') }}"
+  when:
+    - item.description is defined
+    - item.description is match(firewall_managed_prefix ~ '.*')
+
+- name: Ensure existing_rules_by_desc is defined
+  ansible.builtin.set_fact:
+    existing_rules_by_desc: {}
+  when: existing_rules_by_desc is not defined
+
+# Step 3: Build desired rules list
+- name: Initialize desired rules
+  ansible.builtin.set_fact:
+    desired_rules: []
+    _seq: "{{ firewall_sequence_start | int }}"
+
+# Step 3a: Anti-lockout rules (management subnet -> router on 443, 22)
+- name: Build anti-lockout rules
+  ansible.builtin.set_fact:
+    desired_rules: "{{ desired_rules + _anti_lockout_rules }}"
+    _seq: "{{ _seq | int + (firewall_sequence_step | int * 2) }}"
+  vars:
+    _mgmt_iface: "{{ zone_to_interface['management'].identifier | default('') }}"
+    _mgmt_subnet: "{{ deevnet_vlans['management'].subnet | default('') }}"
+    _anti_lockout_rules:
+      - description: "{{ firewall_managed_prefix }} anti-lockout HTTPS management"
+        interface: "{{ _mgmt_iface }}"
+        direction: "in"
+        action: "pass"
+        protocol: "TCP"
+        source_net: "{{ _mgmt_subnet }}"
+        destination_net: "{{ _mgmt_iface }}ip"
+        destination_port: "443"
+        sequence: "{{ _seq | int }}"
+      - description: "{{ firewall_managed_prefix }} anti-lockout SSH management"
+        interface: "{{ _mgmt_iface }}"
+        direction: "in"
+        action: "pass"
+        protocol: "TCP"
+        source_net: "{{ _mgmt_subnet }}"
+        destination_net: "{{ _mgmt_iface }}ip"
+        destination_port: "22"
+        sequence: "{{ _seq | int + firewall_sequence_step | int }}"
+  when:
+    - firewall_anti_lockout | bool
+    - "'management' in zone_to_interface"
+
+# Step 3b: Established/related conntrack rules per VLAN interface
+- name: Build conntrack rules for each zone
+  ansible.builtin.set_fact:
+    desired_rules: "{{ desired_rules + [_conntrack_rule] }}"
+    _seq: "{{ _seq | int + firewall_sequence_step | int }}"
+  vars:
+    _iface: "{{ zone_to_interface[item.key].identifier | default('') }}"
+    _conntrack_rule:
+      description: "{{ firewall_managed_prefix }} conntrack established/related {{ item.key }}"
+      interface: "{{ _iface }}"
+      direction: "in"
+      action: "pass"
+      protocol: ""
+      source_net: ""
+      destination_net: ""
+      destination_port: ""
+      sequence: "{{ _seq | int }}"
+      quick: true
+      state: "established,related"
+  loop: "{{ zone_to_interface | dict2items }}"
+  loop_control:
+    label: "conntrack: {{ item.key }}"
+  when:
+    - _iface | length > 0
+
+# Step 3c: Zone policy rules from firewall_zone_policies
+- name: Build zone policy rules
+  ansible.builtin.set_fact:
+    desired_rules: "{{ desired_rules + [_policy_rule] }}"
+    _seq: "{{ _seq | int + firewall_sequence_step | int }}"
+  vars:
+    _from_iface: "{{ zone_to_interface[item.from_zone].identifier | default('') }}"
+    _from_subnet: "{{ deevnet_vlans[item.from_zone].subnet | default('') }}"
+    _to_subnet: "{{ deevnet_vlans[item.to_zone].subnet | default('') }}"
+    _policy_rule:
+      description: "{{ firewall_managed_prefix }} {{ item.from_zone }} -> {{ item.to_zone }}"
+      interface: "{{ _from_iface }}"
+      direction: "in"
+      action: "{{ item.action | default('pass') }}"
+      protocol: ""
+      source_net: "{{ _from_subnet }}"
+      destination_net: "{{ _to_subnet }}"
+      destination_port: ""
+      sequence: "{{ _seq | int }}"
+  loop: "{{ firewall_zone_policies }}"
+  loop_control:
+    label: "{{ item.from_zone }} -> {{ item.to_zone }}"
+  when:
+    - item.from_zone in zone_to_interface
+    - item.to_zone in deevnet_vlans
+    - _from_iface | length > 0
+    - _from_subnet | length > 0
+    - _to_subnet | length > 0
+
+# Step 3d: Internet access rules for firewall_internet_zones
+- name: Build internet access rules
+  ansible.builtin.set_fact:
+    desired_rules: "{{ desired_rules + [_inet_rule] }}"
+    _seq: "{{ _seq | int + firewall_sequence_step | int }}"
+  vars:
+    _iface: "{{ zone_to_interface[item].identifier | default('') }}"
+    _subnet: "{{ deevnet_vlans[item].subnet | default('') }}"
+    _inet_rule:
+      description: "{{ firewall_managed_prefix }} {{ item }} -> internet"
+      interface: "{{ _iface }}"
+      direction: "in"
+      action: "pass"
+      protocol: ""
+      source_net: "{{ _subnet }}"
+      destination_net: "!10.20.0.0/16"
+      destination_port: ""
+      sequence: "{{ _seq | int }}"
+  loop: "{{ firewall_internet_zones | default([]) }}"
+  loop_control:
+    label: "internet: {{ item }}"
+  when:
+    - item in zone_to_interface
+    - _iface | length > 0
+    - _subnet | length > 0
+
+- name: Display desired rules count
+  ansible.builtin.debug:
+    msg: "Desired managed rules: {{ desired_rules | length }}"
+
+# Step 4: Categorize rules into add / update / delete
+- name: Categorize rules for processing
+  ansible.builtin.set_fact:
+    rules_to_add: >-
+      {{
+        desired_rules
+        | rejectattr('description', 'in', existing_rules_by_desc.keys() | list)
+        | list
+      }}
+    rules_to_update: >-
+      {{
+        desired_rules
+        | selectattr('description', 'in', existing_rules_by_desc.keys() | list)
+        | list
+      }}
+    rules_to_delete: >-
+      {{
+        existing_rules_by_desc | dict2items
+        | rejectattr('key', 'in', desired_rules | map(attribute='description') | list)
+        | list
+      }}
+
+- name: Display categorized rules
+  ansible.builtin.debug:
+    msg: |
+      Rules to add: {{ rules_to_add | length }}
+      Rules to check/update: {{ rules_to_update | length }}
+      Rules to delete: {{ rules_to_delete | length }}
+
+# Step 5a: Add new rules
+- name: Add new firewall rules
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/filter/addRule"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      rule:
+        enabled: "1"
+        action: "{{ item.action }}"
+        interface: "{{ item.interface }}"
+        direction: "{{ item.direction }}"
+        ipprotocol: "inet"
+        protocol: "{{ item.protocol | default('') }}"
+        source_net: "{{ item.source_net | default('') }}"
+        destination_net: "{{ item.destination_net | default('') }}"
+        destination_port: "{{ item.destination_port | default('') }}"
+        description: "{{ item.description }}"
+        sequence: "{{ item.sequence }}"
+    status_code: [200, 201]
+  loop: "{{ rules_to_add }}"
+  loop_control:
+    label: "Adding: {{ item.description }}"
+  when: rules_to_add | length > 0
+  register: add_results
+  delegate_to: localhost
+  changed_when: true
+  notify: apply firewall rules
+
+# Step 5b: Update existing rules if changed
+- name: Update existing firewall rules (if changed)
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/filter/setRule/{{ existing_rules_by_desc[item.description].uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      rule:
+        enabled: "1"
+        action: "{{ item.action }}"
+        interface: "{{ item.interface }}"
+        direction: "{{ item.direction }}"
+        ipprotocol: "inet"
+        protocol: "{{ item.protocol | default('') }}"
+        source_net: "{{ item.source_net | default('') }}"
+        destination_net: "{{ item.destination_net | default('') }}"
+        destination_port: "{{ item.destination_port | default('') }}"
+        description: "{{ item.description }}"
+        sequence: "{{ item.sequence }}"
+    status_code: [200, 201]
+  loop: "{{ rules_to_update }}"
+  loop_control:
+    label: "Updating: {{ item.description }}"
+  when:
+    - rules_to_update | length > 0
+    - >-
+      existing_rules_by_desc[item.description].action != item.action or
+      existing_rules_by_desc[item.description].interface != item.interface or
+      existing_rules_by_desc[item.description].source_net != (item.source_net | default('')) or
+      existing_rules_by_desc[item.description].destination_net != (item.destination_net | default('')) or
+      existing_rules_by_desc[item.description].destination_port != (item.destination_port | default(''))
+  register: update_results
+  delegate_to: localhost
+  changed_when: true
+  notify: apply firewall rules
+
+# Step 5c: Delete orphaned managed rules
+- name: Delete orphaned firewall rules
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/filter/delRule/{{ item.value.uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    status_code: [200, 201]
+  loop: "{{ rules_to_delete }}"
+  loop_control:
+    label: "Deleting: {{ item.key }}"
+  when: rules_to_delete | length > 0
+  register: delete_results
+  delegate_to: localhost
+  changed_when: true
+  notify: apply firewall rules
+
+# Step 6: Report results
+- name: Report firewall configuration results
+  ansible.builtin.debug:
+    msg: |
+      Firewall rule configuration complete:
+      - Added: {{ rules_to_add | length }}
+      - Checked for updates: {{ rules_to_update | length }}
+      - Deleted: {{ rules_to_delete | length }}
+      - Total desired rules: {{ desired_rules | length }}

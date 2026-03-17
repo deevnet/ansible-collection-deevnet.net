@@ -1,11 +1,14 @@
 ---
 # Assign IP addresses and enable VLAN interfaces on OPNsense
 #
-# After VLANs are created, each VLAN sub-interface needs:
-#   - An IP address assigned (the gateway IP from vlans.yml)
-#   - The interface enabled
-#
-# This uses the OPNsense interfaces API to configure each VLAN interface.
+# Strategy:
+#   1. Fetch updated VLAN list to get device names
+#   2. Fetch current interface assignments to find which OPNsense interface
+#      (opt1, opt2, ...) corresponds to each VLAN device
+#   3. For each VLAN with a gateway defined:
+#      - If the interface exists but IP differs or interface is disabled: update
+#      - Set gateway IP with /24 mask and enable the interface
+#   4. Reconfigure interfaces to apply changes
 
 # Step 1: Fetch updated VLAN list to get device names
 - name: Get updated VLAN configuration
@@ -43,22 +46,99 @@
     vlan_devices_by_tag: {}
   when: vlan_devices_by_tag is not defined
 
-# Step 3: Display VLAN device mappings
-- name: Display VLAN interface mappings
-  ansible.builtin.debug:
-    msg: >-
-      {{ item.key }}: VLAN {{ item.value.vlan_id }} ->
-      {{ vlan_devices_by_tag[item.value.vlan_id | string] | default('NOT FOUND') }}
-      ({{ item.value.gateway }}/24)
-  loop: "{{ deevnet_vlans | dict2items }}"
-  loop_control:
-    label: "{{ item.key }}"
+# Step 3: Fetch current interface assignments
+- name: Get current interface configuration
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/overview/export"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: interface_export
+  delegate_to: localhost
 
-- name: Report interface configuration
+# Step 4: Build device name -> OPNsense interface identifier mapping
+- name: Build device to interface identifier mapping
+  ansible.builtin.set_fact:
+    device_to_interface: >-
+      {{
+        device_to_interface | default({}) | combine({
+          (item.value.device | default('')): {
+            'identifier': item.key,
+            'ipv4': item.value.addr4 | default(''),
+            'enabled': item.value.enabled | default('0') | string
+          }
+        })
+      }}
+  loop: "{{ interface_export.json | dict2items }}"
+  loop_control:
+    label: "{{ item.key }} -> {{ item.value.device | default('?') }}"
+  when:
+    - item.value.device is defined
+
+- name: Ensure device_to_interface is defined
+  ansible.builtin.set_fact:
+    device_to_interface: {}
+  when: device_to_interface is not defined
+
+# Step 5: Build list of VLAN interfaces that need IP configuration
+- name: Build VLAN interfaces requiring configuration
+  ansible.builtin.set_fact:
+    vlan_interfaces_to_configure: >-
+      {{
+        deevnet_vlans | dict2items
+        | selectattr('value.gateway', 'defined')
+        | list
+      }}
+
+- name: Display interface configuration plan
   ansible.builtin.debug:
     msg: |
-      VLAN interface configuration complete.
-      Assign IP addresses and enable interfaces via OPNsense GUI:
-        Interfaces -> Assignments -> Assign each VLAN device
-        Then configure each with its gateway IP and /24 subnet.
-      VLAN device mappings have been displayed above for reference.
+      VLAN interfaces to configure: {{ vlan_interfaces_to_configure | length }}
+      Device-to-interface mappings found: {{ device_to_interface | length }}
+
+# Step 6: Configure IP address and enable each VLAN interface
+- name: Configure VLAN interface IP and enable
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/overview/setInterface/{{ _iface_id }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      interface:
+        enable: "1"
+        ipaddr: "{{ item.value.gateway }}"
+        subnet: "24"
+        descr: "{{ item.key }}"
+    status_code: [200, 201]
+  vars:
+    _vlan_device: "{{ vlan_devices_by_tag[item.value.vlan_id | string] | default('') }}"
+    _iface_info: "{{ device_to_interface[_vlan_device] | default({}) }}"
+    _iface_id: "{{ _iface_info.identifier | default('') }}"
+    _current_ip: "{{ _iface_info.ipv4 | default('') }}"
+    _current_enabled: "{{ _iface_info.enabled | default('0') | string }}"
+  loop: "{{ vlan_interfaces_to_configure }}"
+  loop_control:
+    label: "{{ item.key }}: {{ item.value.gateway }}/24 on {{ _iface_id | default('?') }}"
+  when:
+    - _vlan_device | length > 0
+    - _iface_id | length > 0
+    - _current_ip != item.value.gateway or _current_enabled != '1'
+  register: interface_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure interfaces
+
+# Step 7: Report results
+- name: Report interface configuration results
+  ansible.builtin.debug:
+    msg: |
+      VLAN interface configuration complete:
+      - Configured: {{ interface_results.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list | length }}
+      - Skipped (already correct): {{ interface_results.results | default([]) | selectattr('skipped', 'defined') | selectattr('skipped') | list | length }}
+      - Total VLAN interfaces: {{ vlan_interfaces_to_configure | length }}

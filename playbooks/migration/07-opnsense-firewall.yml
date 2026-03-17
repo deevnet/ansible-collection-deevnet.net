@@ -1,0 +1,20 @@
+---
+# Migration Phase 7: Configure inter-VLAN firewall rules on OPNsense
+#
+# Applies zone-based firewall policy (default-deny with explicit allows)
+# as defined in group_vars/all/firewall.yml.
+#
+# Prerequisites:
+#   - Phase 6 complete (VLAN interfaces have IPs and are enabled)
+#   - firewall_zone_policies defined in inventory
+#
+# Verify:
+#   OPNsense GUI -> Firewall -> Automation -> Filter
+#   All rules prefixed with "ansible:" should be present
+#   Test connectivity: management -> trusted (allow), guest -> trusted (deny)
+
+- name: "Migration Phase 7: Configure OPNsense inter-VLAN firewall rules"
+  hosts: dns_servers
+  gather_facts: false
+  roles:
+    - opnsense_firewall
