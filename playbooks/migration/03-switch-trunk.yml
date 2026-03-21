@@ -16,6 +16,10 @@
   vars:
     # Only configure the router uplink trunk in this step.
     # The AP trunk (gi1/0/4) is configured later with access ports.
+    # PVID is NOT set here — changing PVID to 999 would break router
+    # connectivity before OPNsense VLAN interfaces have IPs.
+    # PVID cutover happens after OPNsense interfaces are configured.
+    trunk_set_pvid: false
     switch_ports:
       trunk:
         - interface: "gigabitEthernet 1/0/1"

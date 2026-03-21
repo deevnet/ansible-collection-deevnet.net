@@ -18,7 +18,9 @@
       interface {{ port.interface }}
       switchport general allowed vlan {{ vlans }} tagged
       switchport general allowed vlan {{ native }} untagged
+      {% if trunk_set_pvid | default(true) %}
       switchport pvid {{ native }}
+      {% endif %}
       {% if port.description is defined %}
       description {{ port.description | replace(' ', '-') }}
       {% endif %}

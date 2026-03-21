@@ -4,7 +4,7 @@
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
         migration-switch-mgmt-ip migration-switch-test-port migration-opnsense-dhcp \
         migration-opnsense-interfaces migration-opnsense-firewall \
-        migration-switch-access-ports \
+        migration-switch-access-ports migration-switch-trunk-pvid \
         list clean-deps clean-project deep-clean all
 
 # ---------- Config ----------
@@ -74,6 +74,7 @@ help:
 "  migration-opnsense-interfaces Phase 6: Assign IPs to VLAN interfaces" \
 "  migration-opnsense-firewall   Phase 7: Configure inter-VLAN firewall rules" \
 "  migration-switch-access-ports Phase 8: Move remaining ports to VLANs" \
+"  migration-switch-trunk-pvid  Phase 9: Set trunk PVID to blackhole (after OPNsense interfaces)" \
 "" \
 "  Migration logs are captured in $(MIGRATION_LOG_DIR)/ with timestamps." \
 "" \
@@ -239,5 +240,11 @@ migration-switch-access-ports: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/08-switch-access-ports.yml 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-access-ports.log"
+
+migration-switch-trunk-pvid: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/09-switch-trunk-pvid.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-trunk-pvid.log"
 
 all: rebuild dns dhcp
