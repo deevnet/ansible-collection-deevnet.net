@@ -13,6 +13,14 @@
 - name: "Migration Phase 3: Configure switch trunk uplink"
   hosts: switches
   gather_facts: false
+  vars:
+    # Only configure the router uplink trunk in this step.
+    # The AP trunk (gi1/0/4) is configured later with access ports.
+    switch_ports:
+      trunk:
+        - interface: "gigabitEthernet 1/0/1"
+          description: "uplink to core-rt02"
+          native_vlan: 999
   tasks:
     - name: Configure trunk ports
       ansible.builtin.include_role:

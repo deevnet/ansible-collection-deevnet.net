@@ -14,6 +14,12 @@
   hosts: switches
   gather_facts: false
   tasks:
+    - name: Configure remaining trunk ports (AP)
+      ansible.builtin.include_role:
+        name: switch_vlans
+        tasks_from: configure_trunk_ports.yml
+      tags: [trunk]
+
     - name: Configure access ports
       ansible.builtin.include_role:
         name: switch_vlans

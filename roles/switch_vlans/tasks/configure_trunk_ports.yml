@@ -12,7 +12,7 @@
       {% for port in switch_ports.trunk | default([]) %}
       interface {{ port.interface }}
       switchport mode trunk
-      switchport trunk allowed vlan {{ port.allowed_vlans | default(all_vlan_ids) }}
+      switchport trunk allowed vlan {{ (port.allowed_vlans | join(',')) if port.allowed_vlans is defined else all_vlan_ids }}
       switchport trunk native vlan {{ port.native_vlan | default(switch_trunk_native_vlan) }}
       description {{ port.description | default('trunk uplink') }}
       no shutdown
