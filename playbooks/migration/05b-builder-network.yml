@@ -1,0 +1,20 @@
+---
+# Configure builder network interface for target VLAN
+#
+# Usage: make migration-builder-network
+#
+# Runs only the base role (network config) from deevnet.builder against
+# the builder host. Uses dvntm-new inventory for target IP config with
+# an ansible_host override to connect via the current IP.
+#
+# The interface reload will drop the SSH connection — the playbook will
+# end with a timeout error. This is expected.
+
+- name: "Migration Step 5b: Configure builder network interface"
+  hosts: builder
+  become: true
+  tasks:
+    - name: Configure network interfaces
+      ansible.builtin.include_role:
+        name: deevnet.builder.base
+        tasks_from: configure_interfaces.yml

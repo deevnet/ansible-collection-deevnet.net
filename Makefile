@@ -2,7 +2,7 @@
         dns dhcp vyos switch opnsense \
         preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
-        migration-opnsense-assign migration-switch-mgmt-ip migration-switch-test-port migration-opnsense-dhcp \
+        migration-opnsense-assign migration-builder-network migration-switch-mgmt-ip migration-switch-test-port migration-opnsense-dhcp \
         migration-opnsense-interfaces migration-opnsense-firewall \
         migration-switch-access-ports migration-switch-trunk-pvid \
         list clean-deps clean-project deep-clean all
@@ -69,7 +69,8 @@ help:
 "  migration-switch-vlans        Phase 2: Create VLANs in switch database" \
 "  migration-switch-trunk        Phase 3: Configure trunk uplink to router" \
 "  migration-opnsense-assign    Step 5a: Assign VLAN devices to OPNsense interfaces + configure IPs" \
-"  migration-switch-mgmt-ip     Step 5b: Add VLAN 99 mgmt IP to switch (dual-homed)" \
+"  migration-builder-network   Step 5b: Configure builder eth0 for target VLAN (expects ansible_host override)" \
+"  migration-switch-mgmt-ip     Step 5c: Add VLAN 99 mgmt IP to switch (dual-homed)" \
 "  migration-switch-test-port    Phase 4: Move one port to test VLAN" \
 "  migration-opnsense-dhcp       Phase 5: Configure DHCP for new subnets" \
 "  migration-opnsense-interfaces Phase 6: Assign IPs to VLAN interfaces" \
@@ -205,6 +206,16 @@ migration-switch-trunk: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/03-switch-trunk.yml 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-trunk.log"
+
+migration-builder-network: deps install-dev
+	@echo "Ensuring deevnet.builder collection is installed..."
+	@cd ../ansible-collection-deevnet.builder && make rebuild
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/05b-builder-network.yml \
+	  -i ../ansible-inventory-deevnet/dvntm-new \
+	  -e "ansible_host=$(BUILDER_CURRENT_IP)" 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-builder-network.log"; true
 
 migration-opnsense-assign: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
