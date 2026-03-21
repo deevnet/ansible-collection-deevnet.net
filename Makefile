@@ -1,5 +1,6 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
         dns dhcp vyos switch opnsense \
+        preflight \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
         migration-switch-test-port migration-opnsense-dhcp \
         migration-opnsense-interfaces migration-opnsense-firewall \
@@ -56,6 +57,8 @@ help:
 "" \
 "  switch" \
 "      Configure switch VLANs (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
+"" \
+"  preflight                      Run pre-migration connectivity and readiness checks (read-only)" \
 "" \
 "  migration-opnsense-vlans       Phase 1: Create VLAN interfaces on OPNsense" \
 "  migration-switch-vlans        Phase 2: Create VLANs in switch database" \
@@ -155,6 +158,11 @@ deep-clean: clean-project
 switch: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/switch-vlans.yml
+
+# ---------- Pre-flight ----------
+preflight: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/00-preflight.yml
 
 # ---------- Migration (run in sequence, see migration runbook) ----------
 # Migration targets use the default inventory (dvntm) which has target VLAN

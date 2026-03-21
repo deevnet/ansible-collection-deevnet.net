@@ -1,0 +1,140 @@
+---
+# Pre-flight checks for network migration
+#
+# Usage: make preflight
+# Read-only — no changes are made to any device
+#
+# Validates connectivity and readiness:
+#   Play 1: OPNsense API reachable
+#   Play 2: Switch SSH and MAC table
+#   Play 3: AP reachable via ping
+#   Play 4: Builder services and connectivity
+
+# --- Play 1: OPNsense API connectivity ---
+- name: "Preflight: OPNsense API connectivity"
+  hosts: dns_servers
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Query OPNsense firmware status
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/core/firmware/status"
+        method: GET
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      register: firmware_result
+
+    - name: Assert OPNsense API returned HTTP 200
+      ansible.builtin.assert:
+        that:
+          - firmware_result.status == 200
+        fail_msg: "OPNsense API returned HTTP {{ firmware_result.status }}"
+        success_msg: "OPNsense API is reachable (HTTP 200)"
+
+    - name: Display OPNsense version
+      ansible.builtin.debug:
+        msg: >-
+          [PASS] OPNsense {{ inventory_hostname }} — firmware version:
+          {{ (firmware_result.content | from_json).product.product_version | default('unknown') }}
+
+# --- Play 2: Switch SSH connectivity ---
+- name: "Preflight: Switch SSH connectivity"
+  hosts: switches
+  gather_facts: false
+  tasks:
+    - name: Get switch firmware info
+      ansible.netcommon.cli_command:
+        command: show image-info
+      register: image_info
+
+    - name: Display switch firmware
+      ansible.builtin.debug:
+        msg: "[PASS] Switch {{ inventory_hostname }} — SSH OK\n{{ image_info.stdout }}"
+
+    - name: Get MAC address table
+      ansible.netcommon.cli_command:
+        command: show mac address-table
+      register: mac_table
+
+    - name: Display MAC address table
+      ansible.builtin.debug:
+        msg: "[INFO] MAC address table for {{ inventory_hostname }}:\n{{ mac_table.stdout }}"
+
+# --- Play 3: AP ping check ---
+- name: "Preflight: AP reachability"
+  hosts: aps
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Ping AP
+      ansible.builtin.command:
+        cmd: "ping -c 1 -W 2 {{ ansible_host }}"
+      register: ping_result
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display AP reachability
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if ping_result.rc == 0 else '[FAIL]' }}
+          AP {{ inventory_hostname }} ({{ ansible_host }}) —
+          {{ 'reachable' if ping_result.rc == 0 else 'UNREACHABLE' }}
+
+    - name: Fail if AP is unreachable
+      ansible.builtin.fail:
+        msg: "AP {{ inventory_hostname }} ({{ ansible_host }}) is not reachable"
+      when: ping_result.rc != 0
+
+# --- Play 4: Builder checks ---
+- name: "Preflight: Builder readiness"
+  hosts: network_controllers
+  gather_facts: true
+  tasks:
+    - name: Check omada-controller service status
+      ansible.builtin.systemd:
+        name: omada-controller
+      register: omada_svc
+      check_mode: true
+
+    - name: Display omada-controller status
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if omada_svc.status.ActiveState == 'active' else '[FAIL]' }}
+          omada-controller on {{ inventory_hostname }} — {{ omada_svc.status.ActiveState }}
+
+    - name: Assert omada-controller is active
+      ansible.builtin.assert:
+        that:
+          - omada_svc.status.ActiveState == 'active'
+        fail_msg: "omada-controller is {{ omada_svc.status.ActiveState }}, expected active"
+        success_msg: "omada-controller is active"
+
+    - name: Check eth1 has an IPv4 address
+      ansible.builtin.assert:
+        that:
+          - ansible_eth1 is defined
+          - ansible_eth1.ipv4 is defined
+          - ansible_eth1.ipv4.address is defined
+        fail_msg: "eth1 does not have a DHCP address — builder has no upstream connectivity"
+        success_msg: "eth1 has IPv4 address {{ ansible_eth1.ipv4.address }}"
+
+    - name: Display eth1 address
+      ansible.builtin.debug:
+        msg: "[PASS] Builder {{ inventory_hostname }} eth1 — {{ ansible_eth1.ipv4.address }}"
+
+    - name: Check internet connectivity
+      ansible.builtin.command:
+        cmd: "ping -c 1 -W 3 8.8.8.8"
+      register: internet_ping
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display internet connectivity result
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if internet_ping.rc == 0 else '[WARN]' }}
+          Internet connectivity from {{ inventory_hostname }} —
+          {{ 'reachable' if internet_ping.rc == 0 else 'UNREACHABLE (non-fatal — may not be required)' }}
