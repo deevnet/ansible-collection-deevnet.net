@@ -3,6 +3,8 @@
 import re
 
 MAC_RE = re.compile(r'^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$')
+# TP-Link port names: Gi1/0/1, Te1/0/1, etc.
+PORT_RE = re.compile(r'^(?:Gi|Te|Fa)\d+/\d+/\d+$', re.IGNORECASE)
 
 
 def mac_table_inventory(mac_stdout_lines, hostvars, groups):
@@ -27,20 +29,40 @@ def mac_table_inventory(mac_stdout_lines, hostvars, groups):
             if mac and mac.upper() != 'UNKNOWN':
                 lookup[mac.lower()] = '{} ({})'.format(host, iface_name)
 
-    # Parse MAC table lines
+    # Parse MAC table lines — detect columns by pattern rather than position,
+    # since TP-Link column order varies by firmware.
     entries = []
     unknown = []
     for line in mac_stdout_lines:
         cols = line.split()
-        if len(cols) < 4:
+        if len(cols) < 3:
             continue
-        if not MAC_RE.match(cols[0]):
+
+        mac = None
+        vlan = None
+        port = None
+        for col in cols:
+            if MAC_RE.match(col):
+                mac = col.lower()
+            elif PORT_RE.match(col):
+                port = col
+
+        if mac is None:
             continue
-        mac = cols[0].lower()
-        vlan = cols[1]
-        port = cols[3]
+
+        # VLAN ID is the first purely numeric column in the line
+        for col in cols:
+            if col.isdigit():
+                vlan = col
+                break
+
         inv = lookup.get(mac, 'UNKNOWN')
-        entry = {'mac': mac, 'port': port, 'vlan': vlan, 'inventory': inv}
+        entry = {
+            'mac': mac,
+            'port': port or '—',
+            'vlan': vlan or '—',
+            'inventory': inv,
+        }
         entries.append(entry)
         if inv == 'UNKNOWN':
             unknown.append(entry)
