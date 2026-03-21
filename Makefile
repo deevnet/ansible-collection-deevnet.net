@@ -1,6 +1,6 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
         dns dhcp vyos switch opnsense \
-        preflight \
+        preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
         migration-switch-test-port migration-opnsense-dhcp \
         migration-opnsense-interfaces migration-opnsense-firewall \
@@ -11,6 +11,10 @@
 COLLECTION_NAME ?= deevnet-net
 REQS           ?= collections/requirements.yml
 DEPS_STAMP     ?= .deps.stamp
+
+# ---------- Migration log capture ----------
+MIGRATION_LOG_DIR ?= ./migration-logs
+MIGRATION_TS      = $(shell date +%Y%m%d-%H%M%S)
 
 # User-level collections (shared across repos)
 USER_COLLECTIONS_PATH    ?= $(HOME)/.ansible/collections
@@ -59,6 +63,7 @@ help:
 "      Configure switch VLANs (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
 "  preflight                      Run pre-migration connectivity and readiness checks (read-only)" \
+"  postcheck                      Run post-migration validation checks (read-only, uses dvntm-new)" \
 "" \
 "  migration-opnsense-vlans       Phase 1: Create VLAN interfaces on OPNsense" \
 "  migration-switch-vlans        Phase 2: Create VLANs in switch database" \
@@ -68,6 +73,8 @@ help:
 "  migration-opnsense-interfaces Phase 6: Assign IPs to VLAN interfaces" \
 "  migration-opnsense-firewall   Phase 7: Configure inter-VLAN firewall rules" \
 "  migration-switch-access-ports Phase 8: Move remaining ports to VLANs" \
+"" \
+"  Migration logs are captured in $(MIGRATION_LOG_DIR)/ with timestamps." \
 "" \
 "  list" \
 "      Show installed collections in project and user paths" \
@@ -161,43 +168,69 @@ switch: deps install-dev
 
 # ---------- Pre-flight ----------
 preflight: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/00-preflight.yml
+	  ansible-playbook playbooks/migration/00-preflight.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-preflight.log"
+
+# ---------- Post-migration validation ----------
+postcheck: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/99-postcheck.yml \
+	  -i ../ansible-inventory-deevnet/dvntm-new 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-postcheck.log"
 
 # ---------- Migration (run in sequence, see migration runbook) ----------
 # Migration targets use the default inventory (dvntm) which has target VLAN
 # definitions layered in with current host IPs. After migration completes,
 # dvntm-new (with target IPs) replaces dvntm (Phase 7).
 migration-opnsense-vlans: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml
+	  ansible-playbook playbooks/migration/01-opnsense-vlans.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-vlans.log"
 
 migration-switch-vlans: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/02-switch-vlans.yml
+	  ansible-playbook playbooks/migration/02-switch-vlans.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-vlans.log"
 
 migration-switch-trunk: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/03-switch-trunk.yml
+	  ansible-playbook playbooks/migration/03-switch-trunk.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-trunk.log"
 
 migration-switch-test-port: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/04-switch-test-port.yml
+	  ansible-playbook playbooks/migration/04-switch-test-port.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-test-port.log"
 
 migration-opnsense-dhcp: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml
+	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-dhcp.log"
 
 migration-opnsense-interfaces: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/06-opnsense-interfaces.yml
+	  ansible-playbook playbooks/migration/06-opnsense-interfaces.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-interfaces.log"
 
 migration-opnsense-firewall: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/07-opnsense-firewall.yml
+	  ansible-playbook playbooks/migration/07-opnsense-firewall.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-firewall.log"
 
 migration-switch-access-ports: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/08-switch-access-ports.yml
+	  ansible-playbook playbooks/migration/08-switch-access-ports.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-access-ports.log"
 
 all: rebuild dns dhcp

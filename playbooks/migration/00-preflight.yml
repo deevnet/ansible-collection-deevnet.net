@@ -62,9 +62,21 @@
         command: show mac address-table
       register: mac_table
 
-    - name: Display MAC address table
+    - name: Cross-reference MAC table with inventory
+      ansible.builtin.set_fact:
+        _mac_report: "{{ mac_table.stdout_lines | deevnet.net.mac_table_inventory(hostvars, groups) }}"
+
+    - name: Display MAC-to-inventory mapping
       ansible.builtin.debug:
-        msg: "[INFO] MAC address table for {{ inventory_hostname }}:\n{{ mac_table.stdout }}"
+        msg: "[INFO] MAC address table with inventory mapping for {{ inventory_hostname }}:\n\n{{ _mac_report | deevnet.net.format_mac_table }}"
+
+    - name: Warn about MACs not in inventory
+      ansible.builtin.debug:
+        msg: "[WARN] Unknown MAC {{ item.mac }} on port {{ item.port }} (VLAN {{ item.vlan }}) — not in Ansible inventory"
+      loop: "{{ _mac_report.unknown }}"
+      loop_control:
+        label: "{{ item.mac }}"
+      when: _mac_report.unknown | length > 0
 
 # --- Play 3: AP ping check ---
 - name: "Preflight: AP reachability"

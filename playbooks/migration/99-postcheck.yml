@@ -1,0 +1,235 @@
+---
+# Post-migration validation checks
+#
+# Usage: make postcheck
+# Read-only — no changes are made to any device
+#
+# Run against dvntm-new inventory (target IPs) to validate:
+#   Play 1: OPNsense VLAN interfaces exist with correct tags
+#   Play 2: Switch VLAN database and trunk configuration
+#   Play 3: Device reachability at target IPs
+#   Play 4: Inter-VLAN gateway reachability
+#   Play 5: Builder post-migration state
+
+# --- Play 1: OPNsense VLAN interfaces ---
+- name: "Postcheck: OPNsense VLAN interfaces"
+  hosts: dns_servers
+  gather_facts: false
+  tasks:
+    - name: Query OPNsense VLAN settings
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/interfaces/vlan_settings/searchItem"
+        method: POST
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body: {}
+        return_content: true
+      delegate_to: localhost
+      register: vlan_result
+
+    - name: Extract VLAN tags from response
+      ansible.builtin.set_fact:
+        _vlan_tags: >-
+          {{ vlan_result.json.rows | default([]) | map(attribute='vlanif')
+             | map('regex_search', '\.(\d+)$')
+             | select('string')
+             | map('regex_replace', '^\.', '')
+             | map('int')
+             | list }}
+
+    - name: Assert each expected VLAN tag is present
+      ansible.builtin.assert:
+        that:
+          - item.value.vlan_id | int in _vlan_tags
+        fail_msg: "VLAN {{ item.key }} (tag {{ item.value.vlan_id }}) NOT found on OPNsense"
+        success_msg: "VLAN {{ item.key }} (tag {{ item.value.vlan_id }}) present"
+      loop: "{{ deevnet_vlans | dict2items }}"
+      when: item.value.vlan_id | int != 999
+
+    - name: Display VLAN tags found
+      ansible.builtin.debug:
+        msg: "[PASS] OPNsense VLAN tags found: {{ _vlan_tags | sort }}"
+
+# --- Play 2: Switch VLAN and port validation ---
+- name: "Postcheck: Switch VLAN database and trunk"
+  hosts: switches
+  gather_facts: false
+  tasks:
+    - name: Show VLAN brief
+      ansible.netcommon.cli_command:
+        command: show vlan brief
+      register: vlan_brief
+
+    - name: Display VLAN brief output
+      ansible.builtin.debug:
+        msg: "[INFO] VLAN database for {{ inventory_hostname }}:\n{{ vlan_brief.stdout }}"
+
+    - name: Assert expected VLANs appear in switch database
+      ansible.builtin.assert:
+        that:
+          - "item.value.vlan_id | string in vlan_brief.stdout"
+        fail_msg: "VLAN {{ item.key }} ({{ item.value.vlan_id }}) NOT in switch VLAN database"
+        success_msg: "VLAN {{ item.key }} ({{ item.value.vlan_id }}) present in switch"
+      loop: "{{ deevnet_vlans | dict2items }}"
+      when: item.value.vlan_id | int != 999
+
+    - name: Show trunk uplink switchport
+      ansible.netcommon.cli_command:
+        command: show interface switchport gigabitEthernet 1/0/1
+      register: trunk_info
+
+    - name: Assert trunk mode and native VLAN 999
+      ansible.builtin.assert:
+        that:
+          - "'trunk' in trunk_info.stdout | lower"
+          - "'999' in trunk_info.stdout"
+        fail_msg: "Trunk uplink gi1/0/1 is not in trunk mode or native VLAN is not 999"
+        success_msg: "[PASS] Trunk uplink gi1/0/1 — trunk mode, native VLAN 999"
+
+    - name: Show MAC address table
+      ansible.netcommon.cli_command:
+        command: show mac address-table
+      register: mac_table
+
+    - name: Display MAC address table
+      ansible.builtin.debug:
+        msg: "[INFO] MAC address table for {{ inventory_hostname }}:\n{{ mac_table.stdout }}"
+
+# --- Play 3: Device reachability at target IPs ---
+- name: "Postcheck: Device reachability"
+  hosts: switches,aps,network_controllers
+  gather_facts: false
+  tasks:
+    - name: Ping device at target IP
+      ansible.builtin.command:
+        cmd: "ping -c 2 -W 3 {{ ansible_host }}"
+      delegate_to: localhost
+      register: ping_result
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display reachability result
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if ping_result.rc == 0 else '[FAIL]' }}
+          {{ inventory_hostname }} ({{ ansible_host }}) —
+          {{ 'reachable' if ping_result.rc == 0 else 'UNREACHABLE' }}
+
+    - name: Fail if device is unreachable
+      ansible.builtin.fail:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}) is not reachable at target IP"
+      when: ping_result.rc != 0
+
+# --- Play 4: Inter-VLAN gateway reachability ---
+- name: "Postcheck: Inter-VLAN gateway reachability"
+  hosts: network_controllers
+  gather_facts: false
+  tasks:
+    - name: Ping each VLAN gateway
+      ansible.builtin.command:
+        cmd: "ping -c 2 -W 3 {{ item.value.gateway }}"
+      delegate_to: localhost
+      loop: "{{ deevnet_vlans | dict2items }}"
+      when: item.value.gateway is defined
+      register: gw_results
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display gateway reachability
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if item.rc == 0 else '[FAIL]' }}
+          VLAN {{ item.item.key }} gateway {{ item.item.value.gateway }} —
+          {{ 'reachable' if item.rc == 0 else 'UNREACHABLE' }}
+      loop: "{{ gw_results.results }}"
+      when: item.skipped is not defined or not item.skipped
+      loop_control:
+        label: "{{ item.item.key }}"
+
+    - name: Assert all gateways are reachable
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: "Gateway {{ item.item.value.gateway }} ({{ item.item.key }}) is unreachable"
+        success_msg: "Gateway {{ item.item.value.gateway }} ({{ item.item.key }}) OK"
+      loop: "{{ gw_results.results }}"
+      when: item.skipped is not defined or not item.skipped
+      loop_control:
+        label: "{{ item.item.key }}"
+
+# --- Play 5: Builder post-migration state ---
+- name: "Postcheck: Builder state"
+  hosts: network_controllers
+  gather_facts: true
+  tasks:
+    - name: Check omada-controller service status
+      ansible.builtin.systemd:
+        name: omada-controller
+      register: omada_svc
+      check_mode: true
+
+    - name: Assert omada-controller is active
+      ansible.builtin.assert:
+        that:
+          - omada_svc.status.ActiveState == 'active'
+        fail_msg: "omada-controller is {{ omada_svc.status.ActiveState }}, expected active"
+        success_msg: "[PASS] omada-controller is active"
+
+    - name: Find OS interface for transit by MAC
+      ansible.builtin.set_fact:
+        _transit_iface: "{{ item }}"
+      loop: "{{ ansible_interfaces }}"
+      when:
+        - hostvars[inventory_hostname]['ansible_' + item] is defined
+        - hostvars[inventory_hostname]['ansible_' + item].macaddress is defined
+        - hostvars[inventory_hostname]['ansible_' + item].macaddress | lower == infrastructure.interfaces.eth1.mac | lower
+
+    - name: Assert transit interface has DHCP address
+      ansible.builtin.assert:
+        that:
+          - _transit_iface is defined
+          - hostvars[inventory_hostname]['ansible_' + _transit_iface].ipv4 is defined
+          - hostvars[inventory_hostname]['ansible_' + _transit_iface].ipv4.address is defined
+        fail_msg: "Transit interface does not have a DHCP address"
+        success_msg: >-
+          [PASS] Transit ({{ _transit_iface }}) —
+          {{ hostvars[inventory_hostname]['ansible_' + _transit_iface].ipv4.address }}
+
+    - name: Find OS interface for management by MAC
+      ansible.builtin.set_fact:
+        _mgmt_iface: "{{ item }}"
+      loop: "{{ ansible_interfaces }}"
+      when:
+        - hostvars[inventory_hostname]['ansible_' + item] is defined
+        - hostvars[inventory_hostname]['ansible_' + item].macaddress is defined
+        - hostvars[inventory_hostname]['ansible_' + item].macaddress | lower == infrastructure.interfaces.eth0.mac | lower
+
+    - name: Assert management interface has target IP
+      ansible.builtin.assert:
+        that:
+          - _mgmt_iface is defined
+          - hostvars[inventory_hostname]['ansible_' + _mgmt_iface].ipv4 is defined
+          - hostvars[inventory_hostname]['ansible_' + _mgmt_iface].ipv4.address == ansible_host
+        fail_msg: >-
+          Management interface {{ _mgmt_iface | default('NOT FOUND') }} has IP
+          {{ hostvars[inventory_hostname]['ansible_' + _mgmt_iface].ipv4.address | default('NONE') }},
+          expected {{ ansible_host }}
+        success_msg: >-
+          [PASS] Management ({{ _mgmt_iface }}) — {{ ansible_host }}
+
+    - name: Check internet connectivity
+      ansible.builtin.command:
+        cmd: "ping -c 1 -W 3 8.8.8.8"
+      register: internet_ping
+      ignore_errors: true
+      changed_when: false
+
+    - name: Display internet connectivity result
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if internet_ping.rc == 0 else '[WARN]' }}
+          Internet connectivity from {{ inventory_hostname }} —
+          {{ 'reachable' if internet_ping.rc == 0 else 'UNREACHABLE (non-fatal)' }}
