@@ -1,0 +1,75 @@
+---
+# Move builder port to VLAN 99
+#
+# Usage: make migration-builder-port-move
+#
+# After Step 5c changes the builder's IP to 10.20.99.95, the builder
+# can no longer reach the switch at 192.168.10.10 (different subnet on
+# same VLAN 1). This playbook:
+#   1. Adds a temporary secondary IP on the old subnet (localhost)
+#   2. Moves the builder port to VLAN 99 via the switch
+#   3. Removes the temporary IP (localhost)
+#   4. Verifies the switch is reachable at 10.20.99.10 on VLAN 99
+
+- name: "Step 5d-prep: Add temporary IP to reach switch"
+  hosts: localhost
+  gather_facts: false
+  become: true
+  vars:
+    builder_interface: "{{ _builder_iface | default('enp4s0') }}"
+    builder_old_ip: "{{ _builder_old_ip | default('192.168.10.95/24') }}"
+  tasks:
+    - name: Add temporary secondary IP
+      ansible.builtin.command:
+        cmd: "ip addr add {{ builder_old_ip }} dev {{ builder_interface }}"
+      changed_when: true
+
+    - name: Wait for ARP to settle
+      ansible.builtin.pause:
+        seconds: 2
+
+- name: "Step 5d: Move builder port to VLAN 99"
+  hosts: switches
+  gather_facts: false
+  tasks:
+    - name: Move builder port to VLAN 99
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop:
+        - "configure"
+        - "interface gigabitEthernet 1/0/16"
+        - "switchport general allowed vlan 99 untagged"
+        - "switchport pvid 99"
+        - "exit"
+        - "end"
+        - "copy running-config startup-config"
+      changed_when: true
+
+- name: "Step 5d-cleanup: Remove temporary IP and verify"
+  hosts: localhost
+  gather_facts: false
+  become: true
+  vars:
+    builder_interface: "{{ _builder_iface | default('enp4s0') }}"
+    builder_old_ip: "{{ _builder_old_ip | default('192.168.10.95/24') }}"
+    switch_new_ip: "10.20.99.10"
+  tasks:
+    - name: Remove temporary secondary IP
+      ansible.builtin.command:
+        cmd: "ip addr del {{ builder_old_ip }} dev {{ builder_interface }}"
+      changed_when: true
+      ignore_errors: true
+
+    - name: Verify switch reachable on VLAN 99
+      ansible.builtin.command:
+        cmd: "ping -c 2 -W 3 {{ switch_new_ip }}"
+      changed_when: false
+      register: ping_result
+      ignore_errors: true
+
+    - name: Display result
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if ping_result.rc == 0 else '[FAIL]' }}
+          Switch at {{ switch_new_ip }} —
+          {{ 'reachable on VLAN 99' if ping_result.rc == 0 else 'UNREACHABLE' }}
