@@ -18,6 +18,11 @@ DEPS_STAMP     ?= .deps.stamp
 MIGRATION_LOG_DIR ?= ./migration-logs
 MIGRATION_TS      = $(shell date +%Y%m%d-%H%M%S)
 
+# Post-cutover migration inventory (target IPs).
+# After the builder moves to VLAN 99, the default dvntm inventory has
+# unreachable IPs. All post-cutover targets use dvntm-new instead.
+MIGRATION_INV     ?= ../ansible-inventory-deevnet/dvntm-new
+
 # User-level collections (shared across repos)
 USER_COLLECTIONS_PATH    ?= $(HOME)/.ansible/collections
 
@@ -254,31 +259,36 @@ migration-switch-test-port: deps install-dev
 migration-opnsense-dhcp: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml 2>&1 \
+	  ansible-playbook playbooks/migration/05-opnsense-dhcp.yml \
+	  -i "$(MIGRATION_INV)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-dhcp.log"
 
 migration-opnsense-interfaces: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/06-opnsense-interfaces.yml 2>&1 \
+	  ansible-playbook playbooks/migration/06-opnsense-interfaces.yml \
+	  -i "$(MIGRATION_INV)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-interfaces.log"
 
 migration-opnsense-firewall: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/07-opnsense-firewall.yml 2>&1 \
+	  ansible-playbook playbooks/migration/07-opnsense-firewall.yml \
+	  -i "$(MIGRATION_INV)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-firewall.log"
 
 migration-switch-access-ports: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/08-switch-access-ports.yml 2>&1 \
+	  ansible-playbook playbooks/migration/08-switch-access-ports.yml \
+	  -i "$(MIGRATION_INV)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-access-ports.log"
 
 migration-switch-trunk-pvid: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/09-switch-trunk-pvid.yml 2>&1 \
+	  ansible-playbook playbooks/migration/09-switch-trunk-pvid.yml \
+	  -i "$(MIGRATION_INV)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-trunk-pvid.log"
 
 all: rebuild dns dhcp
