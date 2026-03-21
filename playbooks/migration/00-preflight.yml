@@ -115,18 +115,31 @@
         fail_msg: "omada-controller is {{ omada_svc.status.ActiveState }}, expected active"
         success_msg: "omada-controller is active"
 
-    - name: Check eth1 has an IPv4 address
+    - name: Find OS interface for transit (eth1) by MAC
+      ansible.builtin.set_fact:
+        _transit_iface: "{{ item }}"
+      loop: "{{ ansible_interfaces }}"
+      when:
+        - hostvars[inventory_hostname]['ansible_' + item] is defined
+        - hostvars[inventory_hostname]['ansible_' + item].macaddress is defined
+        - hostvars[inventory_hostname]['ansible_' + item].macaddress | lower == infrastructure.interfaces.eth1.mac | lower
+
+    - name: Check transit interface has an IPv4 address
       ansible.builtin.assert:
         that:
-          - ansible_eth1 is defined
-          - ansible_eth1.ipv4 is defined
-          - ansible_eth1.ipv4.address is defined
-        fail_msg: "eth1 does not have a DHCP address — builder has no upstream connectivity"
-        success_msg: "eth1 has IPv4 address {{ ansible_eth1.ipv4.address }}"
+          - _transit_iface is defined
+          - hostvars[inventory_hostname]['ansible_' + _transit_iface].ipv4 is defined
+          - hostvars[inventory_hostname]['ansible_' + _transit_iface].ipv4.address is defined
+        fail_msg: "Transit interface (eth1) does not have a DHCP address — builder has no upstream connectivity"
+        success_msg: >-
+          Transit interface {{ _transit_iface }} has IPv4 address
+          {{ hostvars[inventory_hostname]['ansible_' + _transit_iface].ipv4.address }}
 
-    - name: Display eth1 address
+    - name: Display transit interface address
       ansible.builtin.debug:
-        msg: "[PASS] Builder {{ inventory_hostname }} eth1 — {{ ansible_eth1.ipv4.address }}"
+        msg: >-
+          [PASS] Builder {{ inventory_hostname }} transit ({{ _transit_iface }}) —
+          {{ hostvars[inventory_hostname]['ansible_' + _transit_iface].ipv4.address }}
 
     - name: Check internet connectivity
       ansible.builtin.command:
