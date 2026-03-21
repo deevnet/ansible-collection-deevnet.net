@@ -1,5 +1,8 @@
 ---
 # Configure access ports with VLAN assignments
+#
+# TP-Link SG2218 uses "General" mode (no trunk/access distinction).
+# Access-like behavior: single VLAN untagged + PVID.
 
 - name: Build access port command list
   ansible.builtin.set_fact:
@@ -7,9 +10,11 @@
       configure
       {% for port in switch_ports.access | default([]) %}
       interface {{ port.interface }}
-      switchport mode access
-      switchport access vlan {{ port.vlan_id }}
-      description {{ port.description | default('') }}
+      switchport general allowed vlan {{ port.vlan_id }} untagged
+      switchport pvid {{ port.vlan_id }}
+      {% if port.description is defined %}
+      description {{ port.description | replace(' ', '-') }}
+      {% endif %}
       no shutdown
       exit
       {% endfor %}
@@ -33,6 +38,5 @@
 
 - name: Display port VLAN assignments
   ansible.builtin.debug:
-    msg: "{{ access_output.stdout_lines | default([]) }}"
-    verbosity: 1
+    msg: "{{ access_output.stdout }}"
   when: access_output is defined and access_output is not skipped

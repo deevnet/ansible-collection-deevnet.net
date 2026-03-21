@@ -81,13 +81,13 @@
         command: show interface switchport gigabitEthernet 1/0/1
       register: trunk_info
 
-    - name: Assert trunk mode and native VLAN 999
+    - name: Assert uplink has PVID 999 and tagged VLANs
       ansible.builtin.assert:
         that:
-          - "'trunk' in trunk_info.stdout | lower"
           - "'999' in trunk_info.stdout"
-        fail_msg: "Trunk uplink gi1/0/1 is not in trunk mode or native VLAN is not 999"
-        success_msg: "[PASS] Trunk uplink gi1/0/1 — trunk mode, native VLAN 999"
+          - "'Tagged' in trunk_info.stdout or 'tagged' in trunk_info.stdout"
+        fail_msg: "Trunk uplink gi1/0/1 — PVID 999 or tagged VLANs not found"
+        success_msg: "[PASS] Trunk uplink gi1/0/1 — PVID 999, tagged VLANs present"
 
     - name: Show MAC address table
       ansible.netcommon.cli_command:

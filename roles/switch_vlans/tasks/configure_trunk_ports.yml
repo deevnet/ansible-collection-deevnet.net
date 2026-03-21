@@ -1,5 +1,8 @@
 ---
 # Configure trunk ports with allowed VLANs
+#
+# TP-Link SG2218 uses "General" mode (no trunk/access distinction).
+# Trunk-like behavior: tagged VLANs + untagged native VLAN + PVID.
 
 - name: Build allowed VLAN list
   ansible.builtin.set_fact:
@@ -10,11 +13,15 @@
     _trunk_commands: |
       configure
       {% for port in switch_ports.trunk | default([]) %}
+      {% set vlans = (port.allowed_vlans | join(',')) if port.allowed_vlans is defined else all_vlan_ids %}
+      {% set native = port.native_vlan | default(switch_trunk_native_vlan) %}
       interface {{ port.interface }}
-      switchport mode trunk
-      switchport trunk allowed vlan {{ (port.allowed_vlans | join(',')) if port.allowed_vlans is defined else all_vlan_ids }}
-      switchport trunk native vlan {{ port.native_vlan | default(switch_trunk_native_vlan) }}
-      description {{ port.description | default('trunk uplink') }}
+      switchport general allowed vlan {{ vlans }} tagged
+      switchport general allowed vlan {{ native }} untagged
+      switchport pvid {{ native }}
+      {% if port.description is defined %}
+      description {{ port.description | replace(' ', '-') }}
+      {% endif %}
       no shutdown
       exit
       {% endfor %}
@@ -38,6 +45,5 @@
 
 - name: Display trunk status
   ansible.builtin.debug:
-    msg: "{{ trunk_output.stdout_lines | default([]) }}"
-    verbosity: 1
+    msg: "{{ trunk_output.stdout }}"
   when: trunk_output is defined and trunk_output is not skipped
