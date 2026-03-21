@@ -1,0 +1,131 @@
+---
+# Assign VLAN devices to OPNsense interface slots and configure IPs
+#
+# Usage: make migration-opnsense-assign
+#
+# OPNsense does not expose interface assignment via API (GitHub #7324).
+# This playbook:
+#   1. Checks which VLAN devices are already assigned
+#   2. Pauses with instructions if any are unassigned
+#   3. Configures IP addresses and enables all VLAN interfaces
+#
+# After this step, the router is reachable via tagged VLAN interfaces.
+
+- name: "Migration: Assign and configure OPNsense VLAN interfaces"
+  hosts: dns_servers
+  gather_facts: false
+  tasks:
+    # --- Step 1: Get VLAN device names ---
+    - name: Get VLAN configuration
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/interfaces/vlan_settings/searchItem"
+        method: POST
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body: {}
+        return_content: true
+      delegate_to: localhost
+      register: vlan_list
+
+    - name: Build VLAN tag to device mapping
+      ansible.builtin.set_fact:
+        _vlan_devices: >-
+          {{ _vlan_devices | default({}) | combine({
+            (item.tag | string): item.vlanif
+          }) }}
+      loop: "{{ vlan_list.json.rows }}"
+      loop_control:
+        label: "VLAN {{ item.tag }} → {{ item.vlanif }}"
+      when: item.tag is defined and item.vlanif is defined
+
+    # --- Step 2: Check current interface assignments ---
+    - name: Get current interface export
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/interfaces/overview/export"
+        method: GET
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      delegate_to: localhost
+      register: iface_export
+
+    - name: Build list of assigned devices
+      ansible.builtin.set_fact:
+        _assigned_devices: >-
+          {{ (iface_export.content | from_json)
+             | map(attribute='device')
+             | select('defined')
+             | list }}
+
+    - name: Identify unassigned VLAN devices
+      ansible.builtin.set_fact:
+        _unassigned: >-
+          {{ deevnet_vlans | dict2items
+             | selectattr('value.gateway', 'defined')
+             | list
+             | map(attribute='value.vlan_id')
+             | map('string')
+             | map('extract', _vlan_devices)
+             | select('defined')
+             | reject('in', _assigned_devices)
+             | list }}
+
+    # --- Step 3: Pause if manual assignment needed ---
+    - name: Show unassigned VLAN devices
+      ansible.builtin.debug:
+        msg: |
+          The following VLAN devices need manual assignment in OPNsense GUI:
+
+          {% for dev in _unassigned %}
+          - {{ dev }}
+          {% endfor %}
+
+          Go to: OPNsense GUI → Interfaces → Assignments
+          Add each device above as a new interface, then click Save.
+          You do NOT need to configure IPs — this playbook handles that.
+      when: _unassigned | length > 0
+
+    - name: Pause for manual interface assignment
+      ansible.builtin.pause:
+        prompt: >-
+          {{ _unassigned | length }} VLAN device(s) need manual assignment
+          in OPNsense GUI (Interfaces → Assignments).
+          Press ENTER after assigning all devices, or Ctrl+C to abort
+      when: _unassigned | length > 0
+
+    - name: Skip message if all assigned
+      ansible.builtin.debug:
+        msg: "[PASS] All VLAN devices are already assigned to interface slots"
+      when: _unassigned | length == 0
+
+    # --- Step 4: Configure IPs on all VLAN interfaces ---
+    - name: Configure VLAN interfaces
+      ansible.builtin.include_role:
+        name: opnsense_vlans
+        tasks_from: configure_interfaces.yml
+
+  handlers:
+    - name: reconfigure vlans
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/interfaces/vlan_settings/reconfigure"
+        method: POST
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+      delegate_to: localhost
+
+    - name: reconfigure interfaces
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/interfaces/overview/reconfigure"
+        method: POST
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+      delegate_to: localhost
