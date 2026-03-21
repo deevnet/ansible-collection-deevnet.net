@@ -1,0 +1,91 @@
+---
+# Add temporary pass-all firewall rules on all VLAN interfaces
+#
+# Usage: make migration-opnsense-temp-fw
+#
+# OPNsense default-denies all traffic on new OPT interfaces. This adds
+# a temp pass-all rule on each VLAN interface so traffic flows during
+# migration. Step 9 (firewall automation) replaces these with proper
+# zone-based policy.
+#
+# Uses the VLAN 99 gateway IP to reach OPNsense (builder is on VLAN 99).
+
+- name: "Migration Step 5e: Temporary firewall rules for VLAN interfaces"
+  hosts: dns_servers
+  gather_facts: false
+  vars:
+    _opnsense_url: "https://10.20.99.1/api"
+  tasks:
+    - name: Get current interface export
+      ansible.builtin.uri:
+        url: "{{ _opnsense_url }}/interfaces/overview/export"
+        method: GET
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+      delegate_to: localhost
+      register: iface_export
+
+    - name: Build VLAN interface list
+      ansible.builtin.set_fact:
+        _vlan_ifaces: >-
+          {{ (iface_export.content | from_json)
+             | selectattr('identifier', 'defined')
+             | selectattr('identifier', 'match', '^opt')
+             | map(attribute='identifier')
+             | list }}
+
+    - name: Show interfaces getting temp rules
+      ansible.builtin.debug:
+        msg: "Adding temp pass-all firewall rules for: {{ _vlan_ifaces | join(', ') }}"
+
+    - name: Add temp pass-all rule per VLAN interface
+      ansible.builtin.uri:
+        url: "{{ _opnsense_url }}/firewall/filter/addRule"
+        method: POST
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          rule:
+            enabled: "1"
+            action: "pass"
+            interface: "{{ item }}"
+            direction: "in"
+            ipprotocol: "inet"
+            protocol: "any"
+            source_net: "any"
+            destination_net: "any"
+            description: "ansible:temp-allow-all-{{ item }}"
+        return_content: true
+        status_code: [200, 201]
+      delegate_to: localhost
+      loop: "{{ _vlan_ifaces }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Apply firewall rules
+      ansible.builtin.uri:
+        url: "{{ _opnsense_url }}/firewall/filter/apply"
+        method: POST
+        url_username: "{{ opnsense_api_key }}"
+        url_password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body: {}
+      delegate_to: localhost
+
+    - name: Verify management gateway reachable
+      ansible.builtin.command:
+        cmd: "ping -c 1 -W 3 10.20.99.1"
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Display result
+      ansible.builtin.debug:
+        msg: "[PASS] Temp pass-all rules applied to {{ _vlan_ifaces | length }} VLAN interfaces. Step 9 replaces these with proper policy."

@@ -2,7 +2,8 @@
         dns dhcp vyos switch opnsense \
         preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
-        migration-opnsense-assign migration-switch-mgmt-ip migration-builder-network migration-builder-port-move \
+        migration-opnsense-assign migration-opnsense-temp-fw \
+        migration-switch-mgmt-ip migration-builder-network migration-builder-port-move \
         migration-switch-test-port migration-opnsense-dhcp \
         migration-opnsense-interfaces migration-opnsense-firewall \
         migration-switch-access-ports migration-switch-trunk-pvid \
@@ -70,6 +71,7 @@ help:
 "  migration-switch-vlans        Phase 2: Create VLANs in switch database" \
 "  migration-switch-trunk        Phase 3: Configure trunk uplink to router" \
 "  migration-opnsense-assign    Step 5a: Assign VLAN devices to OPNsense interfaces + configure IPs" \
+"  migration-opnsense-temp-fw   Step 5a2: Temp pass-all firewall rules on VLAN interfaces" \
 "  migration-switch-mgmt-ip     Step 5b: Add VLAN 99 mgmt IP to switch (dual-homed)" \
 "  migration-builder-network   Step 5c: Configure builder eth0 for target VLAN (expects BUILDER_CURRENT_IP)" \
 "  migration-builder-port-move Step 5d: Move builder port to VLAN 99 (temp IP workaround)" \
@@ -208,6 +210,12 @@ migration-switch-trunk: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/03-switch-trunk.yml 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-switch-trunk.log"
+
+migration-opnsense-temp-fw: deps install-dev
+	@mkdir -p "$(MIGRATION_LOG_DIR)"
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/migration/05e-opnsense-temp-firewall.yml 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-temp-fw.log"
 
 migration-builder-port-move: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
