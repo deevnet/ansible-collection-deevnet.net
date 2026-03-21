@@ -93,33 +93,11 @@
 # Step 4: Identify VLANs missing IPs
 - name: Build list of VLANs needing IP configuration
   ansible.builtin.set_fact:
-    _vlans_needing_ip: >-
-      {% set result = [] %}
-      {% for name, vlan in deevnet_vlans.items() %}
-      {%   if vlan.gateway is defined %}
-      {%     set device = vlan_devices_by_tag.get(vlan.vlan_id | string, '') %}
-      {%     set iface = device_to_interface.get(device, {}) %}
-      {%     set current_ip = iface.get('ipv4', '') %}
-      {%     if current_ip == '' or vlan.gateway not in current_ip %}
-      {%       if result.append({'name': name, 'vlan_id': vlan.vlan_id, 'gateway': vlan.gateway, 'identifier': iface.get('identifier', '?'), 'device': device}) %}{% endif %}
-      {%     endif %}
-      {%   endif %}
-      {% endfor %}
-      {{ result }}
+    _vlans_needing_ip: "{{ deevnet_vlans | deevnet.net.vlans_needing_ip(vlan_devices_by_tag, device_to_interface) }}"
 
 - name: Show VLANs needing IP configuration
   ansible.builtin.debug:
-    msg: |
-      The following VLAN interfaces need IP configuration via OPNsense GUI:
-
-      {% for v in _vlans_needing_ip %}
-      - {{ v.identifier }} ({{ v.device }}): {{ v.gateway }}/24 — {{ v.name }} (VLAN {{ v.vlan_id }})
-      {% endfor %}
-
-      For each interface above:
-        Interfaces → [interface name] → IPv4: Static, address {{ '{{ gateway }}/24' }}, enable → Save
-
-      After configuring all interfaces, click "Apply changes" in the GUI, then press ENTER.
+    msg: "{{ _vlans_needing_ip | deevnet.net.format_vlans_needing_ip }}"
   when: _vlans_needing_ip | length > 0
 
 - name: Pause for manual interface IP configuration
