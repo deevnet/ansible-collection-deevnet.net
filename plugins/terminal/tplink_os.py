@@ -20,7 +20,7 @@ from ansible.plugins.terminal import TerminalBase
 
 class TerminalModule(TerminalBase):
     terminal_stdout_re = [
-        re.compile(rb"[\r\n]?[\w\-\.]+[>|#]\s*$"),
+        re.compile(rb"[\r\n]?[\w\-\.]+(?:\([^\)]+\))?[>#]\s*$"),
     ]
 
     terminal_stderr_re = [

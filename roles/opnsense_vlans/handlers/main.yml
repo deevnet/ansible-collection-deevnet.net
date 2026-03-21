@@ -1,9 +1,19 @@
 ---
 # Apply interface changes on OPNsense
 
+- name: reconfigure vlans
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/vlan_settings/reconfigure"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  delegate_to: localhost
+
 - name: reconfigure interfaces
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/interfaces/overview/reconfig"
+    url: "{{ opnsense_api_url }}/interfaces/overview/reconfigure"
     method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"

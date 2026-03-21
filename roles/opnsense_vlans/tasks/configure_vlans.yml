@@ -92,7 +92,7 @@
   register: create_results
   delegate_to: localhost
   changed_when: true
-  notify: reconfigure interfaces
+  notify: reconfigure vlans
 
 - name: Report VLAN creation results
   ansible.builtin.debug:
