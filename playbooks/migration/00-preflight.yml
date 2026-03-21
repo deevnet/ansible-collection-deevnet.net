@@ -11,10 +11,12 @@
 #   Play 4: Builder services and connectivity
 
 # --- Play 1: OPNsense API connectivity ---
+# Uses delegate_to: localhost (not connection: local) so the local python
+# interpreter is used instead of the host's ansible_python_interpreter
+# (which points to OPNsense's /usr/local/bin/python3).
 - name: "Preflight: OPNsense API connectivity"
   hosts: dns_servers
   gather_facts: false
-  connection: local
   tasks:
     - name: Query OPNsense firmware status
       ansible.builtin.uri:
@@ -25,6 +27,7 @@
         force_basic_auth: true
         validate_certs: false
         return_content: true
+      delegate_to: localhost
       register: firmware_result
 
     - name: Assert OPNsense API returned HTTP 200
@@ -67,11 +70,11 @@
 - name: "Preflight: AP reachability"
   hosts: aps
   gather_facts: false
-  connection: local
   tasks:
     - name: Ping AP
       ansible.builtin.command:
         cmd: "ping -c 1 -W 2 {{ ansible_host }}"
+      delegate_to: localhost
       register: ping_result
       ignore_errors: true
       changed_when: false
