@@ -1,0 +1,118 @@
+---
+# Create Kea DHCP subnets from deevnet_vlans definitions
+#
+# For each VLAN with dhcp_range_start and dhcp_range_end defined,
+# creates a Kea DHCP subnet if one doesn't already exist for that
+# subnet CIDR.
+
+# Step 1: Get existing subnets
+- name: Get current Kea DHCP subnets
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/search_subnet"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: existing_subnets
+  delegate_to: localhost
+
+# Step 2: Build lookup of existing subnet CIDRs -> UUIDs
+- name: Build existing subnet lookup
+  ansible.builtin.set_fact:
+    _existing_subnet_map: >-
+      {{
+        _existing_subnet_map | default({}) | combine({
+          (item.subnet): item.uuid
+        })
+      }}
+  loop: "{{ existing_subnets.json.rows | default([]) }}"
+  loop_control:
+    label: "{{ item.subnet }}"
+
+- name: Ensure existing subnet map is defined
+  ansible.builtin.set_fact:
+    _existing_subnet_map: {}
+  when: _existing_subnet_map is not defined
+
+# Step 3: Create missing subnets
+- name: Create DHCP subnets for VLANs
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/add_subnet"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      subnet4:
+        subnet: "{{ item.value.subnet }}"
+        pools: "{{ item.value.dhcp_range_start }} - {{ item.value.dhcp_range_end }}"
+        description: "{{ item.key }} (VLAN {{ item.value.vlan_id }})"
+        option_data:
+          routers: "{{ item.value.gateway }}"
+          domain_name_servers: "{{ item.value.gateway }}"
+          domain_name: "{{ deevnet_root_domain | default('deevnet.net') }}"
+        option_data_autocollect: "1"
+    status_code: [200, 201]
+  loop: "{{ deevnet_vlans | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}: {{ item.value.subnet | default('no subnet') }}"
+  when:
+    - item.value.dhcp_range_start is defined
+    - item.value.dhcp_range_end is defined
+    - item.value.subnet is defined
+    - item.value.subnet not in _existing_subnet_map
+  register: subnet_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
+- name: Display subnet creation results
+  ansible.builtin.debug:
+    msg: >-
+      Subnets created: {{ subnet_results.results | default([])
+        | selectattr('changed', 'defined') | selectattr('changed') | list | length }},
+      already existed: {{ subnet_results.results | default([])
+        | selectattr('skipped', 'defined') | selectattr('skipped') | list | length }}
+
+# Step 4: Re-fetch subnets to get UUIDs for newly created ones
+- name: Get updated Kea DHCP subnets
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/search_subnet"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: updated_subnets
+  delegate_to: localhost
+
+# Step 5: Build subnet CIDR -> UUID mapping for reservations
+- name: Build subnet UUID lookup
+  ansible.builtin.set_fact:
+    dhcp_subnet_by_cidr: >-
+      {{
+        dhcp_subnet_by_cidr | default({}) | combine({
+          (item.subnet): item.uuid
+        })
+      }}
+  loop: "{{ updated_subnets.json.rows | default([]) }}"
+  loop_control:
+    label: "{{ item.subnet }} -> {{ item.uuid }}"
+
+- name: Ensure dhcp_subnet_by_cidr is defined
+  ansible.builtin.set_fact:
+    dhcp_subnet_by_cidr: {}
+  when: dhcp_subnet_by_cidr is not defined
+
+- name: Display subnet UUID mapping
+  ansible.builtin.debug:
+    msg: "{{ dhcp_subnet_by_cidr }}"

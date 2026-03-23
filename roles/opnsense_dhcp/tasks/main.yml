@@ -8,12 +8,13 @@
       - opnsense_api_key | length > 0
       - opnsense_api_secret is defined
       - opnsense_api_secret | length > 0
-      - dhcp_subnet_uuid is defined
-      - dhcp_subnet_uuid | length > 0
+      - deevnet_vlans is defined
     fail_msg: >-
       Required variables missing. Ensure opnsense_api_key, opnsense_api_secret,
-      and dhcp_subnet_uuid are set (via environment or group_vars/routers.yml).
-      Get subnet UUID via: curl -u "$KEY:$SECRET" "https://opnsense/api/kea/dhcpv4/search_subnet"
+      and deevnet_vlans are set (via environment or group_vars).
+
+- name: Configure Kea DHCP subnets
+  ansible.builtin.include_tasks: configure_subnets.yml
 
 - name: Gather DHCP reservations from inventory
   ansible.builtin.include_tasks: gather_hosts.yml

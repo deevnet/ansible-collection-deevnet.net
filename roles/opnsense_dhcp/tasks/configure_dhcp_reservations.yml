@@ -88,7 +88,7 @@
     body_format: json
     body:
       reservation:
-        subnet: "{{ dhcp_subnet_uuid }}"
+        subnet: "{{ item.ip | deevnet.net.dhcp_subnet_for_ip(dhcp_subnet_by_cidr) }}"
         hw_address: "{{ item.mac }}"
         ip_address: "{{ item.ip }}"
         hostname: "{{ item.hostname }}"
@@ -118,7 +118,7 @@
     body_format: json
     body:
       reservation:
-        subnet: "{{ dhcp_subnet_uuid }}"
+        subnet: "{{ item.ip | deevnet.net.dhcp_subnet_for_ip(dhcp_subnet_by_cidr) }}"
         hw_address: "{{ item.mac }}"
         ip_address: "{{ item.ip }}"
         hostname: "{{ item.hostname }}"
@@ -167,4 +167,4 @@
       - Added: {{ reservations_to_add | length }}
       - Checked for updates: {{ reservations_to_update | length }}
       - Removed: {{ (delete_results.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list | length) | default(0) }}
-      - Subnet UUID: {{ dhcp_subnet_uuid }}
+      - Subnet mappings: {{ dhcp_subnet_by_cidr | length }} subnets
