@@ -1,0 +1,62 @@
+---
+# Ensure Kea DHCP listens on all VLAN interfaces
+#
+# By default, Kea only listens on the LAN interface (re0). VLAN subnets
+# won't serve DHCP unless their interfaces are enabled in Kea settings.
+
+- name: Get current Kea DHCP settings
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/get"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  delegate_to: localhost
+  register: _kea_settings
+
+- name: Build list of all available interfaces
+  ansible.builtin.set_fact:
+    _kea_all_interfaces: >-
+      {{ (_kea_settings.content | from_json).dhcpv4.general.interfaces
+         | dict2items
+         | map(attribute='key')
+         | reject('equalto', '')
+         | list }}
+    _kea_selected_interfaces: >-
+      {{ (_kea_settings.content | from_json).dhcpv4.general.interfaces
+         | dict2items
+         | selectattr('value.selected', 'equalto', 1)
+         | map(attribute='key')
+         | list }}
+
+- name: Check if all VLAN interfaces are enabled
+  ansible.builtin.set_fact:
+    _kea_needs_update: >-
+      {{ (_kea_all_interfaces | reject('in', ['wan']) | list | sort)
+         != (_kea_selected_interfaces | sort) }}
+
+- name: Display Kea interface status
+  ansible.builtin.debug:
+    msg: >-
+      Kea DHCP listening on {{ _kea_selected_interfaces | length }}/{{ _kea_all_interfaces | length }} interfaces.
+      {{ 'Updating to enable all VLAN interfaces.' if _kea_needs_update else 'All interfaces already enabled.' }}
+
+- name: Enable Kea DHCP on all VLAN interfaces
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/set"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      dhcpv4:
+        general:
+          interfaces: "{{ _kea_all_interfaces | reject('equalto', 'wan') | join(',') }}"
+    return_content: true
+  delegate_to: localhost
+  when: _kea_needs_update
+  notify: reconfigure dhcp

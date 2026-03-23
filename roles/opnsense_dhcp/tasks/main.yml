@@ -13,6 +13,9 @@
       Required variables missing. Ensure opnsense_api_key, opnsense_api_secret,
       and deevnet_vlans are set (via environment or group_vars).
 
+- name: Ensure Kea DHCP listens on VLAN interfaces
+  ansible.builtin.include_tasks: configure_kea_interfaces.yml
+
 - name: Configure Kea DHCP subnets
   ansible.builtin.include_tasks: configure_subnets.yml
 
