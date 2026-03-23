@@ -19,9 +19,9 @@ MIGRATION_LOG_DIR ?= ./migration-logs
 MIGRATION_TS      = $(shell date +%Y%m%d-%H%M%S)
 
 # Post-cutover migration inventory (target IPs).
-# After the builder moves to VLAN 99, the default dvntm inventory has
-# unreachable IPs. All post-cutover targets use dvntm-new instead.
-MIGRATION_INV     ?= ../ansible-inventory-deevnet/dvntm-new
+# After inventory promotion (Step 11), dvntm has the target IPs.
+# Before promotion, override with: MIGRATION_INV=../ansible-inventory-deevnet/dvntm-new
+MIGRATION_INV     ?= ../ansible-inventory-deevnet/dvntm
 
 # User-level collections (shared across repos)
 USER_COLLECTIONS_PATH    ?= $(HOME)/.ansible/collections
