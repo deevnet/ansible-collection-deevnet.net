@@ -15,7 +15,6 @@
   gather_facts: false
   vars:
     _omada_url: "https://localhost:8043"
-    _wifi_psk: "{{ wifi_psk | default('changeme') }}"
   tasks:
     # --- Login ---
     - name: Login to Omada controller
@@ -106,7 +105,7 @@
         headers:
           Csrf-Token: "{{ _omada_token }}"
         body_format: json
-        body: "{{ item | deevnet.net.omada_ssid_payload(_wifi_psk, guest=(item.key == 'guest')) }}"
+        body: "{{ item | deevnet.net.omada_ssid_payload(deevnet_wifi_psk[item.key], guest=(item.key == 'guest')) }}"
         return_content: true
         status_code: [200, 201]
       loop: "{{ _ssids_to_create }}"

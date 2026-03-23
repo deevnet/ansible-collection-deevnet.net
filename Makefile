@@ -87,7 +87,7 @@ help:
 "  migration-opnsense-firewall   Phase 7: Configure inter-VLAN firewall rules" \
 "  migration-switch-access-ports Phase 8: Move remaining ports to VLANs" \
 "  migration-switch-trunk-pvid  Phase 9: Set trunk PVID to blackhole (after OPNsense interfaces)" \
-"  migration-omada-ssids       Step 13: Create SSID-to-VLAN mappings in Omada (expects WIFI_PSK)" \
+"  migration-omada-ssids       Step 13: Create SSID-to-VLAN mappings in Omada (PSKs from vault)" \
 "" \
 "  Migration logs are captured in $(MIGRATION_LOG_DIR)/ with timestamps." \
 "" \
@@ -296,8 +296,7 @@ migration-switch-trunk-pvid: deps install-dev
 migration-omada-ssids: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/migration/13-omada-ssids.yml \
-	  -e "wifi_psk=$(WIFI_PSK)" 2>&1 \
+	  ansible-playbook playbooks/migration/13-omada-ssids.yml 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-omada-ssids.log"
 
 all: rebuild dns dhcp
