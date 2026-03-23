@@ -1,0 +1,136 @@
+---
+# Step 13: Configure SSID-to-VLAN mappings via Omada API
+#
+# Usage: make migration-omada-ssids
+#
+# Creates WiFi SSIDs for each VLAN with wifi_ssid defined in deevnet_vlans.
+# Requires Omada controller credentials (omada_admin_user/omada_admin_password)
+# and a wifi_psk variable for the WPA2/WPA3 password.
+#
+# Pass wifi_psk as extra var:
+#   make migration-omada-ssids WIFI_PSK="your-password"
+
+- name: "Migration Step 13: Configure Omada SSIDs"
+  hosts: network_controllers
+  gather_facts: false
+  vars:
+    _omada_url: "https://localhost:8043"
+    _wifi_psk: "{{ wifi_psk | default('changeme') }}"
+  tasks:
+    # --- Login ---
+    - name: Login to Omada controller
+      ansible.builtin.uri:
+        url: "{{ _omada_url }}/api/v2/login"
+        method: POST
+        validate_certs: false
+        body_format: json
+        body:
+          username: "{{ omada_admin_user }}"
+          password: "{{ omada_admin_password }}"
+        return_content: true
+      register: _omada_login
+
+    - name: Extract auth details
+      ansible.builtin.set_fact:
+        _omada_token: "{{ _omada_login.json.result.token }}"
+        _omadac_id: "{{ _omada_login.json.result.omadacId }}"
+        _omada_cookies: "{{ _omada_login.cookies }}"
+
+    # --- Get site ID ---
+    - name: Get sites
+      ansible.builtin.uri:
+        url: "{{ _omada_url }}/{{ _omadac_id }}/api/v2/sites?currentPageSize=100&currentPage=1"
+        method: GET
+        validate_certs: false
+        headers:
+          Csrf-Token: "{{ _omada_token }}"
+        return_content: true
+      register: _omada_sites
+
+    - name: Extract site ID
+      ansible.builtin.set_fact:
+        _site_id: "{{ _omada_sites.json.result.data[0].id }}"
+
+    # --- Get default WLAN group ---
+    - name: Get WLAN groups
+      ansible.builtin.uri:
+        url: "{{ _omada_url }}/{{ _omadac_id }}/api/v2/sites/{{ _site_id }}/setting/wlans?currentPageSize=100&currentPage=1"
+        method: GET
+        validate_certs: false
+        headers:
+          Csrf-Token: "{{ _omada_token }}"
+        return_content: true
+      register: _omada_wlans
+
+    - name: Extract default WLAN group ID
+      ansible.builtin.set_fact:
+        _wlan_id: "{{ _omada_wlans.json.result.data[0].id }}"
+
+    # --- Get existing SSIDs ---
+    - name: Get existing SSIDs
+      ansible.builtin.uri:
+        url: "{{ _omada_url }}/{{ _omadac_id }}/api/v2/sites/{{ _site_id }}/setting/wlans/{{ _wlan_id }}/ssids?currentPageSize=100&currentPage=1"
+        method: GET
+        validate_certs: false
+        headers:
+          Csrf-Token: "{{ _omada_token }}"
+        return_content: true
+      register: _existing_ssids
+
+    - name: Build existing SSID name list
+      ansible.builtin.set_fact:
+        _existing_ssid_names: "{{ _existing_ssids.json.result.data | map(attribute='name') | list }}"
+
+    - name: Display existing SSIDs
+      ansible.builtin.debug:
+        msg: "Existing SSIDs: {{ _existing_ssid_names }}"
+
+    # --- Create SSIDs for VLANs ---
+    - name: Build list of SSIDs to create
+      ansible.builtin.set_fact:
+        _ssids_to_create: >-
+          {{ deevnet_vlans | dict2items
+             | selectattr('value.wifi_ssid', 'defined')
+             | rejectattr('value.wifi_ssid', 'in', _existing_ssid_names)
+             | list }}
+
+    - name: Display SSIDs to create
+      ansible.builtin.debug:
+        msg: "Creating {{ _ssids_to_create | length }} SSIDs: {{ _ssids_to_create | map(attribute='value.wifi_ssid') | list }}"
+
+    - name: Create SSIDs
+      ansible.builtin.uri:
+        url: "{{ _omada_url }}/{{ _omadac_id }}/api/v2/sites/{{ _site_id }}/setting/wlans/{{ _wlan_id }}/ssids"
+        method: POST
+        validate_certs: false
+        headers:
+          Csrf-Token: "{{ _omada_token }}"
+        body_format: json
+        body: "{{ item | deevnet.net.omada_ssid_payload(_wifi_psk, guest=(item.key == 'guest')) }}"
+        return_content: true
+        status_code: [200, 201]
+      loop: "{{ _ssids_to_create }}"
+      loop_control:
+        label: "{{ item.value.wifi_ssid }} → VLAN {{ item.value.vlan_id }}"
+      register: _ssid_results
+
+    - name: Display results
+      ansible.builtin.debug:
+        msg: >-
+          {{ '[PASS]' if item.json.errorCode | default(-1) == 0 else '[FAIL]' }}
+          {{ item.item.value.wifi_ssid }} (VLAN {{ item.item.value.vlan_id }}) —
+          {{ item.json.msg | default('unknown') }}
+      loop: "{{ _ssid_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.value.wifi_ssid }}"
+      when: _ssid_results.results is defined
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: "[PASS] {{ _ssids_to_create | length }} SSIDs created with VLAN mappings. WiFi networks should be broadcasting within 60 seconds."
+      when: _ssids_to_create | length > 0
+
+    - name: All SSIDs already exist
+      ansible.builtin.debug:
+        msg: "[PASS] All {{ deevnet_vlans | dict2items | selectattr('value.wifi_ssid', 'defined') | list | length }} SSIDs already configured."
+      when: _ssids_to_create | length == 0
