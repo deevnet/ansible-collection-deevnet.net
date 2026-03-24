@@ -23,6 +23,7 @@
           -d '{"username":"{{ omada_admin_user }}","password":"{{ omada_admin_password }}"}'
       register: _login_raw
       changed_when: false
+      no_log: true
 
     - name: Parse login response
       ansible.builtin.set_fact:
@@ -111,6 +112,7 @@
       register: _ssid_results
       changed_when: true
       failed_when: false
+      no_log: true
 
     - name: Display results
       ansible.builtin.debug:
