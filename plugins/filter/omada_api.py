@@ -32,6 +32,8 @@ def omada_ssid_payload(vlan_entry, wifi_password, guest=False):
             'versionPsk': 2,
             'gikRekeyPskEnable': False,
         },
+        'rateLimit': {'rateLimitId': ''},
+        'ssidRateLimit': {'rateLimitId': ''},
         'wlanScheduleEnable': False,
         'macFilterEnable': False,
         'enable11r': False,
