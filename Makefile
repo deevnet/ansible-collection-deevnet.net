@@ -71,7 +71,7 @@ help:
 "      Configure switch VLANs (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
 "  preflight                      Run pre-migration connectivity and readiness checks (read-only)" \
-"  postcheck                      Run post-migration validation checks (read-only, uses dvntm-new)" \
+"  postcheck                      Run post-migration validation checks (read-only)" \
 "" \
 "  migration-opnsense-vlans       Phase 1: Create VLAN interfaces on OPNsense" \
 "  migration-switch-vlans        Phase 2: Create VLANs in switch database" \
@@ -193,7 +193,7 @@ postcheck: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/99-postcheck.yml \
-	  -i ../ansible-inventory-deevnet/dvntm-new 2>&1 \
+	  -i "$(MIGRATION_INV)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-postcheck.log"
 
 # ---------- Migration (run in sequence, see migration runbook) ----------
@@ -236,7 +236,7 @@ migration-builder-network: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/05b-builder-network.yml \
-	  -i ../ansible-inventory-deevnet/dvntm-new \
+	  -i "$(MIGRATION_INV)" \
 	  -e "ansible_host=$(BUILDER_CURRENT_IP)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-builder-network.log"; true
 
