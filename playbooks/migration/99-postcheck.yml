@@ -123,7 +123,7 @@
 
 # --- Play 4: Inter-VLAN gateway reachability ---
 - name: "Postcheck: Inter-VLAN gateway reachability"
-  hosts: network_controllers
+  hosts: dns_servers
   gather_facts: false
   tasks:
     - name: Verify VLAN gateway IPs are configured on OPNsense
