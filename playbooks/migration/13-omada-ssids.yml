@@ -109,18 +109,29 @@
       loop_control:
         label: "{{ item.value.wifi_ssid }} → VLAN {{ item.value.vlan_id }}"
       register: _ssid_results
-      changed_when: (item.stdout | default('{}') | from_json).errorCode | default(-1) == 0
-      failed_when: (item.stdout | default('{}') | from_json).errorCode | default(-1) != 0
+      changed_when: true
+      failed_when: false
 
     - name: Display results
       ansible.builtin.debug:
         msg: >-
-          [PASS] {{ item.item.value.wifi_ssid }} (VLAN {{ item.item.value.vlan_id }}) —
-          {{ (item.stdout | from_json).msg | default('created') }}
+          {{ '[PASS]' if (item.stdout | from_json).errorCode | default(-1) == 0 else '[FAIL]' }}
+          {{ item.item.value.wifi_ssid }} (VLAN {{ item.item.value.vlan_id }}) —
+          {{ (item.stdout | from_json).msg | default('unknown') }}
       loop: "{{ _ssid_results.results | default([]) }}"
       loop_control:
         label: "{{ item.item.value.wifi_ssid }}"
       when: _ssid_results.results is defined
+
+    - name: Fail if any SSID creation failed
+      ansible.builtin.fail:
+        msg: "SSID creation failed: {{ item.item.value.wifi_ssid }} — {{ (item.stdout | from_json).msg }}"
+      loop: "{{ _ssid_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.value.wifi_ssid }}"
+      when:
+        - _ssid_results.results is defined
+        - (item.stdout | from_json).errorCode | default(-1) != 0
 
     # --- Cleanup ---
     - name: Remove session cookie file
