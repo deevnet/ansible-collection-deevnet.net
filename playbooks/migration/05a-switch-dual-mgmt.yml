@@ -18,8 +18,9 @@
     switch_mgmt_vlan: 99
     switch_mgmt_ip: "10.20.99.10"
     switch_mgmt_mask: "255.255.255.0"
+    switch_mgmt_gateway: "10.20.99.1"
   tasks:
-    - name: Add VLAN 99 management interface
+    - name: Add VLAN 99 management interface and default gateway
       ansible.netcommon.cli_command:
         command: "{{ item }}"
       loop:
@@ -27,6 +28,7 @@
         - "interface vlan {{ switch_mgmt_vlan }}"
         - "ip address {{ switch_mgmt_ip }} {{ switch_mgmt_mask }}"
         - "exit"
+        - "ip route 0.0.0.0 0.0.0.0 {{ switch_mgmt_gateway }}"
         - "end"
       loop_control:
         label: "{{ item }}"

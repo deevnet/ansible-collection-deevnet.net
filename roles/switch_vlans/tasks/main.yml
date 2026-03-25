@@ -27,3 +27,7 @@
 - name: Configure access ports
   ansible.builtin.include_tasks: configure_access_ports.yml
   tags: [access]
+
+- name: Configure management (default gateway)
+  ansible.builtin.include_tasks: configure_management.yml
+  tags: [mgmt]

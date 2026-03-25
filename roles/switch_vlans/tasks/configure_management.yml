@@ -1,0 +1,16 @@
+---
+# Configure switch management IP and default gateway
+#
+# Reads gateway from env.interfaces.eth0.gateway in host_vars.
+# Only runs if the gateway is defined.
+
+- name: Set default gateway
+  ansible.netcommon.cli_command:
+    command: "{{ item }}"
+  loop:
+    - "configure"
+    - "ip route 0.0.0.0 0.0.0.0 {{ env.interfaces.eth0.gateway }}"
+    - "end"
+  when: env.interfaces.eth0.gateway is defined
+  changed_when: true
+  notify: write memory
