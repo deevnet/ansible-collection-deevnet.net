@@ -1,0 +1,52 @@
+---
+# Enable OPNsense DNS and DHCP services
+#
+# Used after transitioning to core router-authoritative mode to ensure
+# OPNsense is serving DNS and DHCP for the substrate.
+#
+# Secrets are vaulted in inventory (group_vars/routers/vault.yml).
+# Usage:
+#   ansible-playbook playbooks/enable-opnsense-services.yml --ask-vault-pass
+
+- name: Enable OPNsense DNS and DHCP services
+  hosts: routers
+  gather_facts: false
+
+  tasks:
+    - name: Start Kea DHCP service
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/kea/service/start"
+        method: POST
+        user: "{{ opnsense_api_key }}"
+        password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: "{{ opnsense_validate_certs }}"
+        return_content: true
+      delegate_to: localhost
+      register: _dhcp_start
+
+    - name: Display DHCP start result
+      ansible.builtin.debug:
+        msg: "Kea DHCP start: {{ _dhcp_start.json | default(_dhcp_start.content) }}"
+
+    - name: Start Unbound DNS service
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/unbound/service/start"
+        method: POST
+        user: "{{ opnsense_api_key }}"
+        password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: "{{ opnsense_validate_certs }}"
+        return_content: true
+      delegate_to: localhost
+      register: _dns_start
+
+    - name: Display DNS start result
+      ansible.builtin.debug:
+        msg: "Unbound DNS start: {{ _dns_start.json | default(_dns_start.content) }}"
+
+    - name: Confirm services enabled
+      ansible.builtin.debug:
+        msg: >-
+          OPNsense DNS and DHCP services started on {{ inventory_hostname }}.
+          Core router is now authoritative for DNS/DHCP.

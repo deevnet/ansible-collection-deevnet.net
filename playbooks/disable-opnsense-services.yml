@@ -1,0 +1,52 @@
+---
+# Disable OPNsense DNS and DHCP services
+#
+# Used before reverting to bootstrap-authoritative mode to prevent
+# DHCP/DNS conflicts between OPNsense and the builder's dnsmasq.
+#
+# Secrets are vaulted in inventory (group_vars/routers/vault.yml).
+# Usage:
+#   ansible-playbook playbooks/disable-opnsense-services.yml --ask-vault-pass
+
+- name: Disable OPNsense DNS and DHCP services
+  hosts: routers
+  gather_facts: false
+
+  tasks:
+    - name: Stop Kea DHCP service
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/kea/service/stop"
+        method: POST
+        user: "{{ opnsense_api_key }}"
+        password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: "{{ opnsense_validate_certs }}"
+        return_content: true
+      delegate_to: localhost
+      register: _dhcp_stop
+
+    - name: Display DHCP stop result
+      ansible.builtin.debug:
+        msg: "Kea DHCP stop: {{ _dhcp_stop.json | default(_dhcp_stop.content) }}"
+
+    - name: Stop Unbound DNS service
+      ansible.builtin.uri:
+        url: "{{ opnsense_api_url }}/unbound/service/stop"
+        method: POST
+        user: "{{ opnsense_api_key }}"
+        password: "{{ opnsense_api_secret }}"
+        force_basic_auth: true
+        validate_certs: "{{ opnsense_validate_certs }}"
+        return_content: true
+      delegate_to: localhost
+      register: _dns_stop
+
+    - name: Display DNS stop result
+      ansible.builtin.debug:
+        msg: "Unbound DNS stop: {{ _dns_stop.json | default(_dns_stop.content) }}"
+
+    - name: Confirm services disabled
+      ansible.builtin.debug:
+        msg: >-
+          OPNsense DNS and DHCP services stopped on {{ inventory_hostname }}.
+          Safe to enable bootstrap-authoritative mode on the builder.
