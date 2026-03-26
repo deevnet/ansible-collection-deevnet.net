@@ -1,0 +1,17 @@
+---
+# roles/opnsense_wol/tasks/main.yml
+# Configure Wake-on-LAN entries in OPNsense from inventory
+#
+# Reads env.interfaces.<name>.wol: true and infrastructure.interfaces.<name>.mac
+# from all hosts in inventory. Registers each flagged interface as a WoL host
+# in OPNsense via the wol plugin API.
+#
+# Requires:
+#   - os-wol plugin installed on OPNsense
+#   - opnsense_api_url, opnsense_api_key, opnsense_api_secret
+
+- name: Gather WoL hosts from inventory
+  ansible.builtin.include_tasks: gather_wol_hosts.yml
+
+- name: Get current WoL entries from OPNsense
+  ansible.builtin.include_tasks: configure_wol.yml

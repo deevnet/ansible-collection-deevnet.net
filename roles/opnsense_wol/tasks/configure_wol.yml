@@ -1,0 +1,98 @@
+---
+# Configure WoL entries in OPNsense via the wol plugin API
+#
+# Idempotent:
+#   1. Fetch current WoL entries
+#   2. Add missing entries
+#   3. Skip entries that already exist (matched by MAC)
+
+# Step 1: Get current WoL entries
+- name: Get current WoL entries from OPNsense
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/wol/wol/searchHost"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: _wol_current
+  delegate_to: localhost
+
+- name: Build existing MAC set
+  ansible.builtin.set_fact:
+    _existing_wol_macs: "{{ _wol_current.json.rows | default([]) | map(attribute='mac') | map('upper') | list }}"
+
+- name: Display existing WoL entries
+  ansible.builtin.debug:
+    msg: "Existing WoL MACs ({{ _existing_wol_macs | length }}): {{ _existing_wol_macs }}"
+
+# Step 2: Discover OPNsense interface identifier for management VLAN
+# WoL needs the OPNsense interface name (e.g., "lan", "opt1")
+- name: Get OPNsense interface assignments
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/overview/export"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: _opn_interfaces
+  delegate_to: localhost
+
+- name: Build device-to-identifier mapping
+  ansible.builtin.set_fact:
+    _opn_iface_by_subnet: >-
+      {{
+        _opn_iface_by_subnet | default({}) | combine({
+          (item.value.addr4 | default('') | regex_replace('/.*$', '') | regex_replace('\\.[0-9]+$', '.0')): item.key
+        })
+      }}
+  loop: "{{ _opn_interfaces.json | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}: {{ item.value.addr4 | default('none') }}"
+  when:
+    - item.value.addr4 is defined
+    - item.value.addr4 | length > 0
+
+- name: Display interface-to-subnet mapping
+  ansible.builtin.debug:
+    msg: "OPNsense interfaces by subnet: {{ _opn_iface_by_subnet | default({}) }}"
+    verbosity: 1
+
+# Step 3: Add missing WoL entries
+- name: Add WoL entry for {{ item.description }}
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/wol/wol/addHost"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      host:
+        interface: "{{ _opn_iface_by_subnet[_host_subnet] | default('lan') }}"
+        mac: "{{ item.mac | lower | regex_replace(':', ':') }}"
+        descr: "{{ item.description }}"
+    return_content: true
+    status_code: [200]
+  loop: "{{ wol_hosts }}"
+  loop_control:
+    label: "{{ item.description }}"
+  when: item.mac | upper not in _existing_wol_macs
+  vars:
+    _host_ip: "{{ hostvars[item.hostname]['env']['interfaces'][item.interface_key].ip | default('') }}"
+    _host_subnet: "{{ _host_ip | regex_replace('\\.[0-9]+$', '.0') if _host_ip not in ['dhcp', 'null', ''] else '' }}"
+  delegate_to: localhost
+
+- name: Display WoL configuration summary
+  ansible.builtin.debug:
+    msg: >-
+      WoL configuration complete.
+      Total entries: {{ wol_hosts | length }}.
+      Added: {{ wol_hosts | rejectattr('mac', 'in', _existing_wol_macs) | list | length }}.
+      Already existed: {{ wol_hosts | selectattr('mac', 'in', _existing_wol_macs) | list | length }}.

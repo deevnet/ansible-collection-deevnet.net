@@ -1,0 +1,5 @@
+---
+# OPNsense WoL role defaults
+
+# Description prefix for WoL entries managed by this role
+wol_description_prefix: "Ansible-managed"

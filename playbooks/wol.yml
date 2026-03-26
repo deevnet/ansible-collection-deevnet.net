@@ -1,0 +1,15 @@
+---
+# Configure Wake-on-LAN entries in OPNsense
+#
+# Registers all hosts with wol: true in their inventory interface definitions.
+# Requires the os-wol plugin to be installed on OPNsense.
+#
+# Secrets are vaulted in inventory (group_vars/routers/vault.yml).
+# Usage:
+#   ansible-playbook playbooks/wol.yml --ask-vault-pass
+
+- name: Configure OPNsense Wake-on-LAN
+  hosts: routers
+  gather_facts: false
+  roles:
+    - opnsense_wol

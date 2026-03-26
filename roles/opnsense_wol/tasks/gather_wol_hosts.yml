@@ -1,0 +1,44 @@
+---
+# Build WoL host list from inventory
+# Finds all interfaces with wol: true and resolves their MAC addresses
+# Handles multiple WoL interfaces per host (e.g., provisioner with eth0 + eth1)
+
+- name: Initialize WoL host list
+  ansible.builtin.set_fact:
+    wol_hosts: []
+
+- name: Gather WoL entries from all hosts
+  ansible.builtin.set_fact:
+    wol_hosts: "{{ wol_hosts + _host_wol_entries }}"
+  loop: "{{ groups['all'] }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - hostvars[item]['env'] is defined
+    - hostvars[item]['env']['interfaces'] is defined
+    - hostvars[item]['infrastructure'] is defined
+    - hostvars[item]['infrastructure']['interfaces'] is defined
+    - _host_wol_entries | length > 0
+  vars:
+    _env_interfaces: "{{ hostvars[item]['env']['interfaces'] | dict2items }}"
+    _infra_interfaces: "{{ hostvars[item]['infrastructure']['interfaces'] }}"
+    _host_wol_entries: >-
+      [
+      {% for iface in _env_interfaces
+         | selectattr('value.wol', 'defined')
+         | selectattr('value.wol', 'equalto', true) %}
+      {% set mac = _infra_interfaces[iface.key].mac | default('') %}
+      {% if mac and mac not in ['UNKNOWN', 'unknown', ''] %}
+      {
+        "hostname": "{{ item }}",
+        "interface_key": "{{ iface.key }}",
+        "mac": "{{ mac | upper }}",
+        "description": "{{ wol_description_prefix }} - {{ item }} ({{ iface.key }})"
+      }{{ "," if not loop.last else "" }}
+      {% endif %}
+      {% endfor %}
+      ]
+
+- name: Display WoL hosts to configure
+  ansible.builtin.debug:
+    msg: "WoL entries ({{ wol_hosts | length }}): {{ wol_hosts | map(attribute='description') | list }}"
