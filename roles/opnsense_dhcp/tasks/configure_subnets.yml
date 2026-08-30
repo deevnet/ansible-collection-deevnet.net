@@ -19,6 +19,7 @@
     return_content: true
   register: existing_subnets
   delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
 
 # Step 2: Build lookup of existing subnet CIDRs -> UUIDs
 - name: Build existing subnet lookup
@@ -94,6 +95,7 @@
     return_content: true
   register: updated_subnets
   delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
 
 # Step 5: Build subnet CIDR -> UUID mapping for reservations
 - name: Build subnet UUID lookup
