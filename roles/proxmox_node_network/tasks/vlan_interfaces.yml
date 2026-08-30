@@ -1,0 +1,73 @@
+---
+# Create the tenant fabric's VLAN sub-interfaces on the bridge.
+#
+# Strictly additive, and deliberately gateway-less even for the transit
+# interface that will eventually carry the default route. PVE allows exactly
+# one default gateway per node - "Default gateway already exists on interface
+# 'vmbr0'" - so the gateway cannot simply be attached here. Moving it is an
+# atomic swap, and that lives in default_route.yml behind its own tag.
+
+- name: Create missing VLAN sub-interfaces
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_url }}/nodes/{{ proxmox_node }}/network"
+    method: POST
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    body_format: form-urlencoded
+    body:
+      iface: "{{ item.interface }}"
+      type: vlan
+      cidr: "{{ item.cidr }}"
+      comments: "{{ item.comment | default(omit, true) }}"
+      autostart: 1
+    status_code: [200]
+  loop: "{{ proxmox_node_network.vlans | default([]) }}"
+  loop_control:
+    label: "create {{ item.interface }} ({{ item.cidr }})"
+  when: item.interface not in _pve_ifaces
+  delegate_to: localhost
+  no_log: true
+  failed_when: false
+  register: _created
+  changed_when: true
+  notify: apply network configuration
+
+# no_log hides the Authorization header, but it also hides why a call failed.
+# PVE's error body carries no credentials, so surface just that.
+- name: Report any interface that could not be created
+  ansible.builtin.fail:
+    msg: >-
+      Creating {{ item.item.interface }} failed ({{ item.status }}):
+      {{ item.json.errors | default(item.json.message) | default('no detail') }}
+  loop: "{{ _created.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.interface | default('?') }}"
+  when:
+    - not (item.skipped | default(false))
+    - item.status | default(0) != 200
+
+- name: Correct the address on existing VLAN sub-interfaces
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_url }}/nodes/{{ proxmox_node }}/network/{{ item.interface }}"
+    method: PUT
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    body_format: form-urlencoded
+    body:
+      type: vlan
+      cidr: "{{ item.cidr }}"
+      comments: "{{ item.comment | default(omit, true) }}"
+      autostart: 1
+    status_code: [200]
+  loop: "{{ proxmox_node_network.vlans | default([]) }}"
+  loop_control:
+    label: "update {{ item.interface }} ({{ item.cidr }})"
+  when:
+    - item.interface in _pve_ifaces
+    - (_pve_ifaces[item.interface].cidr | default('')) != item.cidr
+  delegate_to: localhost
+  no_log: true
+  changed_when: true
+  notify: apply network configuration

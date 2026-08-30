@@ -1,0 +1,27 @@
+---
+- name: apply network configuration
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_url }}/nodes/{{ proxmox_node }}/network"
+    method: PUT
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    status_code: [200]
+  delegate_to: localhost
+  no_log: true
+  listen: apply network configuration
+
+# ifreload does not carry ip rules across, so the policy routing has to be
+# re-asserted after the network is applied. Ordered after the apply by being
+# notified from the same tasks - handlers run in declaration order.
+- name: restart mgmt routing
+  ansible.builtin.systemd_service:
+    name: "{{ proxmox_mgmt_routing_unit }}"
+    state: restarted
+  become: true
+  # Keyed on the unit having actually been installed this run, not on the
+  # node's intent to use it. Intent is declared in host_vars before the unit
+  # exists, and restarting a unit that is not installed yet just fails the
+  # additive run for no reason.
+  when: _mgmt_routing_installed | default(false) | bool
+  listen: apply network configuration

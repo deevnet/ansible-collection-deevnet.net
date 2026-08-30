@@ -1,0 +1,91 @@
+---
+# Main entry point for proxmox_node_network role
+#
+# Configures a Proxmox VE node's bridge and VLAN sub-interfaces through the PVE
+# API, so a hypervisor's substrate attachment is inventory-driven like every
+# other network device here.
+#
+# The node's interfaces are substrate, so they are Ansible's - Terraform owns
+# only what lives inside the SDN fabric (ADR-0001).
+#
+# Input variables (host_vars/<hv>/vars.yml):
+#   proxmox_node             PVE node name, e.g. pve2
+#   proxmox_token_id/secret  API token with Sys.Modify
+#   proxmox_node_network     bridge + mgmt + vlans topology
+#   proxmox_mgmt_routing     source-based routing for the mgmt address
+#
+# Tags:
+#   interfaces     additive - bridge becomes VLAN-aware, VLAN sub-interfaces
+#                  created. Safe: nothing existing loses connectivity.
+#   mgmt-routing   install the source-based routing unit (needs SSH).
+#   default-route  THE RISKY ONE - moves the default route off management.
+#                  Refuses to run unless mgmt-routing is in place first.
+
+# The playbook targets the hypervisors group, but only a tenant hypervisor
+# carries a fabric attachment. Skipping is the appliance behaviour: inventory
+# decides which nodes this applies to, not the playbook's host pattern.
+- name: Skip hosts with no fabric attachment defined
+  ansible.builtin.meta: end_host
+  when: proxmox_node_network | default({}) | length == 0
+  tags: [always]
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - proxmox_node is defined
+      - proxmox_node | length > 0
+      - proxmox_token_id is defined
+      - proxmox_token_id | length > 0
+      - proxmox_token_secret is defined
+      - proxmox_token_secret | length > 0
+      - proxmox_node_network is defined
+      - proxmox_node_network.bridge is defined
+      - proxmox_node_network.bridge.name is defined
+    fail_msg: >-
+      Required variables missing. This role expects proxmox_node,
+      proxmox_token_id, proxmox_token_secret and proxmox_node_network to be
+      set in host_vars/<hypervisor>/vars.yml.
+  tags: [always]
+
+- name: Read current node network configuration
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_url }}/nodes/{{ proxmox_node }}/network"
+    method: GET
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    return_content: true
+  register: _pve_network
+  delegate_to: localhost
+  no_log: true
+  check_mode: false
+  tags: [always]
+
+- name: Index current interfaces by name
+  ansible.builtin.set_fact:
+    _pve_ifaces: >-
+      {{ dict(_pve_network.json.data | map(attribute='iface') | zip(_pve_network.json.data)) }}
+  tags: [always]
+
+- name: Show current interfaces
+  ansible.builtin.debug:
+    msg: >-
+      {{ proxmox_node }}: {{ _pve_ifaces.keys() | sort | list }}
+  tags: [always]
+
+- name: Configure the bridge
+  ansible.builtin.import_tasks: bridge.yml
+  tags: [interfaces]
+
+- name: Configure VLAN sub-interfaces
+  ansible.builtin.import_tasks: vlan_interfaces.yml
+  tags: [interfaces]
+
+- name: Configure management source-based routing
+  ansible.builtin.import_tasks: mgmt_routing.yml
+  when: proxmox_mgmt_routing.enabled | bool
+  tags: [mgmt-routing]
+
+- name: Move the default route off the management interface
+  ansible.builtin.import_tasks: default_route.yml
+  tags: [default-route]
