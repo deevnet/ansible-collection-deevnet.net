@@ -36,7 +36,7 @@
         existing_vlans_by_tag | default({}) | combine({
           (item.tag | string): {
             'uuid': item.uuid,
-            'device': item.vlanif | default(''),
+            'device': item.vlanif | default('') | regex_replace('\s*\[.*$', ''),
             'description': item.description | default('')
           }
         })
