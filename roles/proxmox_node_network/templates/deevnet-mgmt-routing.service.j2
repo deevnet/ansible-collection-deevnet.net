@@ -24,6 +24,13 @@ Type=oneshot
 RemainAfterExit=yes
 # ip rule add is not idempotent - it stacks duplicates - so clear first.
 ExecStartPre=-/sbin/ip rule del from {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }} priority {{ proxmox_mgmt_routing.priority }}
+# The connected route MUST come before the default, and leaving it out breaks
+# management access rather than merely making it suboptimal. Without it every
+# reply from this address - including to hosts on this very subnet - is sent
+# to the gateway. The perimeter has no state for a connection whose SYN went
+# on-link and never passed through it, so it drops the SYN-ACK: ICMP still
+# works and every TCP session hangs.
+ExecStart=/sbin/ip route replace {{ _mgmt_subnet }} dev {{ proxmox_node_network.mgmt.interface }} scope link src {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }}
 ExecStart=/sbin/ip route replace default via {{ _mgmt_gateway }} dev {{ proxmox_node_network.mgmt.interface }} table {{ proxmox_mgmt_routing.table }}
 ExecStart=/sbin/ip rule add from {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }} priority {{ proxmox_mgmt_routing.priority }}
 ExecStop=-/sbin/ip rule del from {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }} priority {{ proxmox_mgmt_routing.priority }}

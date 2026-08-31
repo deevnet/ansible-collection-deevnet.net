@@ -12,7 +12,13 @@
 
 - name: Resolve the management address and its gateway
   ansible.builtin.set_fact:
-    _mgmt_ip: "{{ proxmox_node_network.mgmt.cidr | ansible.utils.ipaddr('address') }}"
+    # Plain split rather than ansible.utils.ipaddr: that filter pulls in
+    # netaddr as a control-node dependency, which is a lot of machinery for
+    # taking the part before the slash.
+    _mgmt_ip: "{{ proxmox_node_network.mgmt.cidr | regex_replace('/.*$', '') }}"
+    _mgmt_subnet: >-
+      {{ proxmox_node_network.mgmt.subnet
+         | default(deevnet_vlans.management.subnet, true) }}
     _mgmt_gateway: >-
       {{ proxmox_node_network.mgmt.routing_gateway
          | default(env.interfaces.eth0.gateway, true)
@@ -23,6 +29,7 @@
     that:
       - _mgmt_ip | length > 0
       - _mgmt_gateway | length > 0
+      - _mgmt_subnet | length > 0
     fail_msg: >-
       Could not resolve the management address/gateway for the routing unit.
       Set proxmox_node_network.mgmt.cidr and either
@@ -66,3 +73,23 @@
       run the default-route tag until this is working, or the node will only
       be reachable from its own management subnet.
     success_msg: "Policy rule active: {{ _ip_rule.stdout | trim }}"
+
+- name: Read the policy routing table back
+  ansible.builtin.command: "ip route show table {{ proxmox_mgmt_routing.table }}"
+  register: _ip_table
+  changed_when: false
+  become: true
+
+# Checked explicitly because its absence is not a degraded mode, it is an
+# outage: with only a default route in the table, replies from the management
+# address to its own subnet are sent via the gateway, the perimeter has no
+# state for them, and management TCP hangs while ICMP keeps working.
+- name: Assert the connected route is present
+  ansible.builtin.assert:
+    that:
+      - _mgmt_subnet in _ip_table.stdout
+    fail_msg: >-
+      Table {{ proxmox_mgmt_routing.table }} has no connected route for
+      {{ _mgmt_subnet }} - on-link management traffic would be sent via the
+      gateway and dropped by the perimeter.
+    success_msg: "Connected route present; on-link management traffic stays on-link."
