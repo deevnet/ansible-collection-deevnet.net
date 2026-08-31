@@ -1,0 +1,59 @@
+---
+# The SDN fabric's node-side daemons.
+#
+# The SDN objects are cluster config; these are what actually realize them on
+# the node. Without them the fabric exists in the API and does nothing, which
+# is a confusing failure because every object reports "available":
+#
+#   frr       the EVPN control plane. PVE writes /etc/frr/frr.conf from the SDN
+#             config; without the daemon there is no BGP and no EVPN.
+#   dnsmasq   per-VNet DHCP and DNS. Without it a tenant VM gets no address and
+#             the fabric IPAM stays empty.
+#
+# Kept in this role because they are the node-side half of the substrate
+# network attachment, not general host config.
+
+- name: Install the fabric's node-side daemons
+  ansible.builtin.apt:
+    name: "{{ proxmox_fabric_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  register: _fabric_pkgs
+
+# PVE runs one dnsmasq instance PER SDN zone, from its own generated config in
+# /etc/dnsmasq.d/. Debian's packaged unit starts a system-wide instance that
+# binds :53 and competes with them, so it is disabled - the PVE SDN docs call
+# this out as a required step, not a preference.
+- name: Disable the distribution's system-wide dnsmasq instance
+  ansible.builtin.systemd_service:
+    name: dnsmasq
+    enabled: false
+    state: stopped
+    masked: false
+  become: true
+  when: "'dnsmasq' in proxmox_fabric_packages"
+
+- name: Ensure frr is enabled and running
+  ansible.builtin.systemd_service:
+    name: frr
+    enabled: true
+    state: started
+  become: true
+  when: "'frr' in proxmox_fabric_packages"
+
+- name: Report daemon state
+  ansible.builtin.command: systemctl is-active frr
+  register: _frr_active
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Show what the fabric now has to work with
+  ansible.builtin.debug:
+    msg: >-
+      frr={{ _frr_active.stdout | default('unknown') }};
+      packages {{ 'changed' if _fabric_pkgs.changed else 'already present' }}.
+      SDN config is regenerated on the next apply - re-run the tenant factory
+      or `pvesh set /cluster/sdn` if the fabric was created before this ran.

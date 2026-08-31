@@ -20,3 +20,9 @@ proxmox_mgmt_routing:
   priority: 100
 
 proxmox_mgmt_routing_unit: deevnet-mgmt-routing
+
+# Node-side daemons the SDN fabric needs to actually function. The SDN objects
+# are cluster config; these realize them. See tasks/fabric_packages.yml.
+proxmox_fabric_packages:
+  - frr
+  - dnsmasq

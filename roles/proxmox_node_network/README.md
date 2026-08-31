@@ -31,11 +31,13 @@ ones, not as a convenience.
 
 | Tag | What it does | Risk |
 |---|---|---|
+| `packages` | Installs `frr` and `dnsmasq` — the daemons that realize the SDN config (**needs SSH**) | None; without them the fabric exists in the API and does nothing |
 | `interfaces` | Bridge becomes VLAN-aware; VLAN sub-interfaces created | Additive - nothing loses connectivity |
 | `mgmt-routing` | Installs the source-based routing unit (**needs SSH**) | None on its own |
 | `default-route` | Moves the default route off management onto transit | **Can cost access** - refuses to run unless `mgmt-routing` is active |
 
 ```bash
+ansible-playbook playbooks/proxmox-node-network.yml --tags packages
 ansible-playbook playbooks/proxmox-node-network.yml --tags interfaces
 ansible-playbook playbooks/proxmox-node-network.yml --tags mgmt-routing
 ansible-playbook playbooks/proxmox-node-network.yml --tags default-route
@@ -59,3 +61,14 @@ It is a systemd unit rather than PVE network config because the PVE network API
 models interfaces only, with no field for post-up hooks or routing tables, and
 a second bridge stanza in `/etc/network/interfaces.d/` would collide with the
 one the API owns.
+
+## Why the daemons matter
+
+The SDN objects are cluster configuration; `frr` and `dnsmasq` are what turn
+them into a working network on the node. This is a confusing failure mode when
+they are missing, because every SDN object still reports `status: available` —
+the bridge exists, so PVE is satisfied — while no tenant VM can get an address
+and the fabric IPAM stays empty.
+
+`frr-pythontools` being installed does **not** imply `frr` is. They are separate
+packages and only the latter is the routing daemon.

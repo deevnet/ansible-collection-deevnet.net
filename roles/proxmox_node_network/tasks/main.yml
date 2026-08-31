@@ -15,6 +15,8 @@
 #   proxmox_mgmt_routing     source-based routing for the mgmt address
 #
 # Tags:
+#   packages       install frr and dnsmasq, the daemons that actually realize
+#                  the SDN config on the node. Needs SSH.
 #   interfaces     additive - bridge becomes VLAN-aware, VLAN sub-interfaces
 #                  created. Safe: nothing existing loses connectivity.
 #   mgmt-routing   install the source-based routing unit (needs SSH).
@@ -72,6 +74,10 @@
     msg: >-
       {{ proxmox_node }}: {{ _pve_ifaces.keys() | sort | list }}
   tags: [always]
+
+- name: Install the fabric's node-side daemons
+  ansible.builtin.import_tasks: fabric_packages.yml
+  tags: [packages]
 
 - name: Configure the bridge
   ansible.builtin.import_tasks: bridge.yml
