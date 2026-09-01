@@ -1,0 +1,137 @@
+---
+# Delegate each tenant zone to the tenant DNS server (ADR-0004).
+#
+# Unbound keeps answering for substrate names exactly as before; these entries
+# only say "for this zone, ask that server instead". Tenant records therefore
+# never enter Unbound's configuration at all, which is what makes them immune
+# to dns_delete_unmanaged - the constraint is met structurally rather than by
+# being careful.
+#
+# Same reconcile shape as configure_unbound.yml: read current state, compare,
+# add or update, never blind-write.
+
+- name: Build the tenant delegation list
+  ansible.builtin.set_fact:
+    dns_domain_overrides: >-
+      [
+      {% for t in deevnet_tenants | default([]) %}
+      {
+        "domain": "{{ t.name }}.{{ deevnet_substrate }}.{{ deevnet_root_domain }}",
+        "server": "{{ dns_tenant_server }}",
+        "description": "{{ dns_description_prefix }} - tenant {{ t.name }} (ADR-0004)"
+      },
+      {
+        "domain": "{{ 128 + (t.index | int) }}.{{ deevnet_site_octet }}.10.in-addr.arpa",
+        "server": "{{ dns_tenant_server }}",
+        "description": "{{ dns_description_prefix }} - tenant {{ t.name }} reverse (ADR-0004)"
+      }{{ "," if not loop.last else "" }}
+      {% endfor %}
+      ]
+
+- name: Get current Unbound configuration
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/get"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: unbound_domain_config
+  delegate_to: localhost
+
+# The domain-override collection has moved between OPNsense releases. Rather
+# than silently reconciling nothing against a shape that is not there, say so.
+- name: Assert the Unbound model exposes domain overrides
+  ansible.builtin.assert:
+    that:
+      - unbound_domain_config.json.unbound[dns_domain_override_key] is defined
+    fail_msg: >-
+      This OPNsense build's unbound/settings/get has no
+      '{{ dns_domain_override_key }}' collection, so tenant zones cannot be
+      delegated. Inspect the payload and set dns_domain_override_key /
+      dns_domain_override_item to match:
+        curl -k -u KEY:SECRET {{ opnsense_api_url }}/unbound/settings/get | jq '.unbound | keys'
+    success_msg: "Unbound exposes '{{ dns_domain_override_key }}'."
+
+- name: Build domain to existing override mapping
+  ansible.builtin.set_fact:
+    existing_domains: >-
+      {{
+        existing_domains | default({}) | combine({
+          (item.value.domain | string): {
+            'uuid': item.key,
+            'domain': item.value.domain | default(''),
+            'server': item.value.server | default('')
+          }
+        })
+      }}
+  loop: >-
+    {{ (unbound_domain_config.json.unbound[dns_domain_override_key][dns_domain_override_item]
+        | default({})) | dict2items }}
+  loop_control:
+    label: "{{ item.value.domain | default('unknown') }}"
+  when:
+    - unbound_domain_config.json.unbound[dns_domain_override_key][dns_domain_override_item] is mapping
+    - item.value.domain is defined
+
+- name: Ensure existing_domains is defined
+  ansible.builtin.set_fact:
+    existing_domains: {}
+  when: existing_domains is not defined
+
+- name: Categorize delegations
+  ansible.builtin.set_fact:
+    domains_to_add: >-
+      {{ dns_domain_overrides | rejectattr('domain', 'in', existing_domains.keys() | list) | list }}
+    domains_to_update: >-
+      {{ dns_domain_overrides | selectattr('domain', 'in', existing_domains.keys() | list) | list }}
+
+- name: Report delegation plan
+  ansible.builtin.debug:
+    msg: >-
+      Tenant delegations - {{ domains_to_add | length }} to add,
+      {{ domains_to_update | length }} already present.
+
+- name: Add tenant zone delegations
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/addDomainOverride"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      domain:
+        enabled: "1"
+        domain: "{{ item.domain }}"
+        server: "{{ item.server }}"
+        description: "{{ item.description }}"
+  loop: "{{ domains_to_add }}"
+  loop_control:
+    label: "{{ item.domain }} -> {{ item.server }}"
+  delegate_to: localhost
+  notify: reconfigure unbound
+
+- name: Update tenant zone delegations whose target moved
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/setDomainOverride/{{ existing_domains[item.domain].uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      domain:
+        enabled: "1"
+        domain: "{{ item.domain }}"
+        server: "{{ item.server }}"
+        description: "{{ item.description }}"
+  loop: "{{ domains_to_update }}"
+  loop_control:
+    label: "{{ item.domain }} -> {{ item.server }}"
+  when: existing_domains[item.domain].server != item.server
+  delegate_to: localhost
+  notify: reconfigure unbound
