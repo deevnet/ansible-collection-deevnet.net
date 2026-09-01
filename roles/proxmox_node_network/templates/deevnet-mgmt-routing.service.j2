@@ -1,0 +1,39 @@
+# {{ ansible_managed }}
+#
+# Source-based routing for the management address on a tenant hypervisor.
+#
+# The node's default route lives on the tenant transit segment so the data
+# plane never rides the management network. Without this unit, a request to
+# the management address from another VLAN would arrive on the management
+# interface and be answered out the transit interface, and the perimeter
+# firewall would drop the asymmetric return.
+#
+# Keying on the SOURCE address rather than the destination is what makes this
+# work without weakening the perimeter: replies from the management address go
+# back out the management interface, while forwarded tenant traffic - which is
+# SNATed to the transit address, not this one - still takes the default route
+# out transit.
+[Unit]
+Description=Deevnet: source-based routing for the management interface
+Documentation=https://github.com/deevnet/deevnet-docs
+After=networking.service
+Wants=networking.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# ip rule add is not idempotent - it stacks duplicates - so clear first.
+ExecStartPre=-/sbin/ip rule del from {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }} priority {{ proxmox_mgmt_routing.priority }}
+# The connected route MUST come before the default, and leaving it out breaks
+# management access rather than merely making it suboptimal. Without it every
+# reply from this address - including to hosts on this very subnet - is sent
+# to the gateway. The perimeter has no state for a connection whose SYN went
+# on-link and never passed through it, so it drops the SYN-ACK: ICMP still
+# works and every TCP session hangs.
+ExecStart=/sbin/ip route replace {{ _mgmt_subnet }} dev {{ proxmox_node_network.mgmt.interface }} scope link src {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }}
+ExecStart=/sbin/ip route replace default via {{ _mgmt_gateway }} dev {{ proxmox_node_network.mgmt.interface }} table {{ proxmox_mgmt_routing.table }}
+ExecStart=/sbin/ip rule add from {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }} priority {{ proxmox_mgmt_routing.priority }}
+ExecStop=-/sbin/ip rule del from {{ _mgmt_ip }} table {{ proxmox_mgmt_routing.table }} priority {{ proxmox_mgmt_routing.priority }}
+
+[Install]
+WantedBy=multi-user.target

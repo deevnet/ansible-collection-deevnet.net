@@ -32,6 +32,7 @@
       {{
         fw_vlan_devices_by_tag | default({}) | combine({
           (item.tag | string): item.vlanif | default('')
+            | regex_replace('\s*\[.*$', '')
         })
       }}
   loop: "{{ fw_vlans.json.rows | default([]) }}"

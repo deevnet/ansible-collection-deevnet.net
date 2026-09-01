@@ -14,6 +14,7 @@
     validate_certs: "{{ opnsense_validate_certs }}"
     return_content: true
   delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
   register: _kea_settings
 
 - name: Build list of all available interfaces

@@ -24,6 +24,7 @@
     return_content: true
   register: dhcp_reservations
   delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
 
 - name: Display current reservations count
   ansible.builtin.debug:

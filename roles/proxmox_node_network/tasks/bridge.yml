@@ -1,0 +1,44 @@
+---
+# Make the management bridge VLAN-aware.
+#
+# vmbr0 is a plain bridge over the single NIC. A VLAN sub-interface of a plain
+# bridge does not tag on the wire, so the transit and underlay segments cannot
+# exist until the bridge is VLAN-aware. This is the documented PVE pattern and
+# is also what lets SDN attach cleanly later.
+#
+# The bridge keeps carrying untagged traffic on its own address, so making it
+# VLAN-aware does not disturb management while the switch port's native VLAN is
+# still the management VLAN.
+
+- name: Determine whether the bridge needs updating
+  ansible.builtin.set_fact:
+    _bridge: "{{ _pve_ifaces[proxmox_node_network.bridge.name] | default({}) }}"
+
+- name: Fail if the bridge does not exist
+  ansible.builtin.fail:
+    msg: >-
+      Bridge {{ proxmox_node_network.bridge.name }} was not found on
+      {{ proxmox_node }}. This role configures an existing management bridge;
+      it does not create one.
+  when: _bridge | length == 0
+
+- name: Update the bridge to be VLAN-aware
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_url }}/nodes/{{ proxmox_node }}/network/{{ proxmox_node_network.bridge.name }}"
+    method: PUT
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    body_format: form-urlencoded
+    body:
+      type: bridge
+      bridge_ports: "{{ _bridge.bridge_ports | default(omit) }}"
+      bridge_vlan_aware: "{{ 1 if proxmox_node_network.bridge.vlan_aware | default(true) else 0 }}"
+      bridge_vids: "{{ proxmox_node_network.bridge.vids | default('2-4094') }}"
+      autostart: 1
+    status_code: [200]
+  delegate_to: localhost
+  no_log: true
+  when: (_bridge.bridge_vlan_aware | default(0) | int) != 1
+  changed_when: true
+  notify: apply network configuration

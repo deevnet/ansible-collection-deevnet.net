@@ -20,6 +20,7 @@
     return_content: true
   register: _wol_current
   delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
 
 - name: Build existing MAC set
   ansible.builtin.set_fact:
@@ -42,21 +43,25 @@
     return_content: true
   register: _opn_interfaces
   delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
 
 - name: Build device-to-identifier mapping
   ansible.builtin.set_fact:
+    # interfaces/overview/export returns a LIST of interface objects
+    # (each with .identifier and .addr4), not a dict. It also replies with
+    # a text/html content-type, so uri never sets .json — parse .content.
     _opn_iface_by_subnet: >-
       {{
         _opn_iface_by_subnet | default({}) | combine({
-          (item.value.addr4 | default('') | regex_replace('/.*$', '') | regex_replace('\\.[0-9]+$', '.0')): item.key
+          (item.addr4 | default('') | regex_replace('/.*$', '') | regex_replace('[.][0-9]+$', '.0')): item.identifier
         })
       }}
-  loop: "{{ _opn_interfaces.json | dict2items }}"
+  loop: "{{ _opn_interfaces.content | from_json }}"
   loop_control:
-    label: "{{ item.key }}: {{ item.value.addr4 | default('none') }}"
+    label: "{{ item.identifier }}: {{ item.addr4 | default('none') }}"
   when:
-    - item.value.addr4 is defined
-    - item.value.addr4 | length > 0
+    - item.addr4 is defined
+    - item.addr4 | length > 0
 
 - name: Display interface-to-subnet mapping
   ansible.builtin.debug:
@@ -86,7 +91,7 @@
   when: item.mac | upper not in _existing_wol_macs
   vars:
     _host_ip: "{{ hostvars[item.hostname]['env']['interfaces'][item.interface_key].ip | default('') }}"
-    _host_subnet: "{{ _host_ip | regex_replace('\\.[0-9]+$', '.0') if _host_ip not in ['dhcp', 'null', ''] else '' }}"
+    _host_subnet: "{{ _host_ip | regex_replace('[.][0-9]+$', '.0') if _host_ip not in ['dhcp', 'null', ''] else '' }}"
   delegate_to: localhost
 
 - name: Display WoL configuration summary

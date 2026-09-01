@@ -1,5 +1,5 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
-        dns dhcp vyos switch opnsense \
+        dns dhcp vyos switch opnsense proxmox-net \
         preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
         migration-opnsense-assign migration-opnsense-temp-fw \
@@ -69,6 +69,11 @@ help:
 "" \
 "  switch" \
 "      Configure switch VLANs (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
+"" \
+"  proxmox-net [TAGS=...]" \
+"      Configure a tenant hypervisor's bridge and VLAN sub-interfaces via the PVE API." \
+"      Defaults to TAGS=interfaces (additive). Then TAGS=mgmt-routing, then" \
+"      TAGS=default-route - see roles/proxmox_node_network/README.md" \
 "" \
 "  preflight                      Run pre-migration connectivity and readiness checks (read-only)" \
 "  postcheck                      Run post-migration validation checks (read-only)" \
@@ -148,6 +153,10 @@ dns: install-dev
 dhcp: install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/dhcp.yml
+
+proxmox-net: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/proxmox-node-network.yml $(if $(TAGS),--tags $(TAGS),--tags interfaces)
 
 opnsense: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \

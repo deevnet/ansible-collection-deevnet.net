@@ -1,0 +1,23 @@
+---
+# Configure a tenant hypervisor's substrate network attachment
+#
+# Makes the management bridge VLAN-aware and creates the tenant fabric's
+# transit and underlay sub-interfaces, then - separately, and only when asked -
+# moves the default route off management so the data plane stops riding the
+# management segment.
+#
+# Run the tags in order; see roles/proxmox_node_network/README.md for why the
+# last one is separable:
+#
+#   ansible-playbook playbooks/proxmox-node-network.yml --tags interfaces
+#   ansible-playbook playbooks/proxmox-node-network.yml --tags mgmt-routing
+#   ansible-playbook playbooks/proxmox-node-network.yml --tags default-route
+#
+# Only mgmt-routing needs SSH to the hypervisor; the rest is PVE API calls made
+# from the control node.
+
+- name: Configure Proxmox node network
+  hosts: "{{ target | default('hypervisors') }}"
+  gather_facts: false
+  roles:
+    - proxmox_node_network

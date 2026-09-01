@@ -1,0 +1,28 @@
+---
+# proxmox_node_network role defaults
+
+# Proxmox API. proxmox_node, proxmox_token_id and proxmox_token_secret come
+# from host_vars/<hv>/ - see the hypervisor host_vars in the Deevnet inventory.
+proxmox_api_port: 8006
+proxmox_api_url: "https://{{ ansible_host }}:{{ proxmox_api_port }}/api2/json"
+proxmox_validate_certs: false
+
+# Interface topology. Expected from host_vars/<hv>/vars.yml; see that file for
+# the shape. Empty here so the role fails its own assertion rather than doing
+# something surprising to a node it was pointed at by accident.
+proxmox_node_network: {}
+
+# Source-based routing for the management address. Disabled by default: it is
+# only needed once the management interface gives up the default route.
+proxmox_mgmt_routing:
+  enabled: false
+  table: 100
+  priority: 100
+
+proxmox_mgmt_routing_unit: deevnet-mgmt-routing
+
+# Node-side daemons the SDN fabric needs to actually function. The SDN objects
+# are cluster config; these realize them. See tasks/fabric_packages.yml.
+proxmox_fabric_packages:
+  - frr
+  - dnsmasq

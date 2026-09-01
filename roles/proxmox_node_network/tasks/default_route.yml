@@ -1,0 +1,95 @@
+---
+# Move the default route from the management interface to the transit
+# interface, as one atomic swap.
+#
+# PVE permits exactly one default gateway per node, so this cannot be done by
+# adding the new one and removing the old: the add is rejected while the old
+# still exists. Both edits are staged, then applied together.
+#
+# This is the step that can cost you access to the node, so it is gated: it
+# refuses to run unless the source-based routing unit is actually active. With
+# the unit in place the node stays reachable on its management address from any
+# VLAN; without it, only from the management subnet itself.
+
+- name: Identify the interface that should carry the default route
+  ansible.builtin.set_fact:
+    _default_route_vlan: >-
+      {{ (proxmox_node_network.vlans | default([])
+          | selectattr('gateway', 'defined')
+          | rejectattr('gateway', 'none')
+          | list | first) | default({}, true) }}
+
+- name: Assert exactly one interface claims the default route
+  ansible.builtin.assert:
+    that:
+      - _default_route_vlan | length > 0
+      - (proxmox_node_network.vlans | selectattr('gateway', 'defined')
+         | rejectattr('gateway', 'none') | list | length) == 1
+    fail_msg: >-
+      Exactly one entry in proxmox_node_network.vlans must define a gateway -
+      that is the interface the node's default route moves to. Found
+      {{ proxmox_node_network.vlans | selectattr('gateway', 'defined')
+         | rejectattr('gateway', 'none') | list | length }}.
+
+- name: Check the management routing unit is active
+  ansible.builtin.systemd_service:
+    name: "{{ proxmox_mgmt_routing_unit }}"
+  register: _routing_unit
+  become: true
+  changed_when: false
+  failed_when: false
+
+- name: Refuse to continue without source-based routing
+  ansible.builtin.assert:
+    that:
+      - proxmox_mgmt_routing.enabled | bool
+      - _routing_unit.status is defined
+      - _routing_unit.status.ActiveState | default('') == 'active'
+    fail_msg: >-
+      Refusing to move the default route off {{ proxmox_node_network.mgmt.interface }}:
+      the {{ proxmox_mgmt_routing_unit }} unit is not active. Run this role with
+      --tags mgmt-routing first. Without it, {{ proxmox_node }} would answer
+      requests to its management address out the transit interface and the
+      perimeter would drop the asymmetric replies.
+    success_msg: "Source-based routing is active - safe to move the default route."
+
+- name: Stage - remove the gateway from the management interface
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_url }}/nodes/{{ proxmox_node }}/network/{{ proxmox_node_network.mgmt.interface }}"
+    method: PUT
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    body_format: form-urlencoded
+    body:
+      type: bridge
+      bridge_ports: "{{ _pve_ifaces[proxmox_node_network.mgmt.interface].bridge_ports | default(omit) }}"
+      bridge_vlan_aware: 1
+      bridge_vids: "{{ proxmox_node_network.bridge.vids | default('2-4094') }}"
+      cidr: "{{ proxmox_node_network.mgmt.cidr }}"
+      autostart: 1
+      delete: gateway
+    status_code: [200]
+  delegate_to: localhost
+  no_log: true
+  changed_when: true
+
+- name: Stage - give the default route to the transit interface
+  ansible.builtin.uri:
+    url: "{{ proxmox_api_url }}/nodes/{{ proxmox_node }}/network/{{ _default_route_vlan.interface }}"
+    method: PUT
+    headers:
+      Authorization: "PVEAPIToken={{ proxmox_token_id }}={{ proxmox_token_secret }}"
+    validate_certs: "{{ proxmox_validate_certs }}"
+    body_format: form-urlencoded
+    body:
+      type: vlan
+      cidr: "{{ _default_route_vlan.cidr }}"
+      gateway: "{{ _default_route_vlan.gateway }}"
+      comments: "{{ _default_route_vlan.comment | default(omit, true) }}"
+      autostart: 1
+    status_code: [200]
+  delegate_to: localhost
+  no_log: true
+  changed_when: true
+  notify: apply network configuration
