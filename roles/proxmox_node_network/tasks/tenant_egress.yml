@@ -1,0 +1,192 @@
+---
+# Tenant egress: make the exit node forward, and make it forward through the
+# perimeter rather than around it.
+#
+# Two independent gaps, and they mask each other. Forwarding on the transit
+# interface is what makes tenant egress work at all; the VRF default route is
+# what makes it leave via the perimeter instead of falling through to the main
+# table and landing on the management VLAN. Fixing only the first produces a
+# working tenant that quietly bypasses ADR-0001 seam 1, which is the more
+# dangerous of the two failures because it looks like success.
+#
+# Both are node-local state that Proxmox will not model, delivered as code -
+# the same bargain already struck for the management routing unit, and for the
+# same reason: the PVE network API models interfaces and nothing else.
+
+- name: Identify the transit interface carrying the default route
+  ansible.builtin.set_fact:
+    # Same selector default_route.yml uses - the VLAN that claims a gateway is
+    # by definition the one holding the node's default route, and therefore the
+    # way out of the fabric.
+    _transit: >-
+      {{ (proxmox_node_network.vlans | default([])
+          | selectattr('gateway', 'defined')
+          | rejectattr('gateway', 'none')
+          | list | first) | default({}, true) }}
+
+- name: Resolve the transit interface and gateway
+  ansible.builtin.set_fact:
+    _transit_interface: "{{ _transit.interface | default('') }}"
+    _transit_gateway: "{{ _transit.gateway | default('') }}"
+
+# Ansible replaces a dict from inventory rather than merging it into the role
+# default, so host_vars declaring only `enabled` and `tenants` would drop every
+# other key. Resolve the optional ones here so inventory states intent and not
+# defaults it does not care about.
+- name: Resolve optional tenant egress settings
+  ansible.builtin.set_fact:
+    _egress_forwarding: "{{ proxmox_tenant_egress.forwarding | default(true) | bool }}"
+    _egress_sysctl_file: >-
+      {{ proxmox_tenant_egress.sysctl_file
+         | default('/etc/sysctl.d/90-deevnet-tenant-fabric.conf', true) }}
+
+- name: Assert the transit path resolved
+  ansible.builtin.assert:
+    that:
+      - _transit_interface | length > 0
+      - _transit_gateway | length > 0
+    fail_msg: >-
+      No transit interface found. Exactly one entry in
+      proxmox_node_network.vlans must define a gateway - that is the segment
+      tenant egress leaves by.
+    success_msg: "Tenant egress leaves via {{ _transit_interface }} to {{ _transit_gateway }}."
+
+- name: Assert tenants are declared
+  ansible.builtin.assert:
+    that:
+      - proxmox_tenant_egress.tenants | default([]) | length > 0
+    fail_msg: >-
+      proxmox_tenant_egress.enabled is true but no tenants are listed. Set
+      proxmox_tenant_egress.tenants in host_vars/{{ inventory_hostname }}/ to
+      the tenant names the fabric carries - the zone ID, which is also the VRF
+      suffix (zone 'tdemo' -> vrf_tdemo).
+
+# --- Forwarding -------------------------------------------------------------
+
+- name: Install the fabric forwarding sysctl
+  ansible.builtin.template:
+    src: deevnet-tenant-fabric.conf.j2
+    dest: "{{ _egress_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: apply fabric sysctls
+
+- name: Apply sysctls now if they were just written
+  ansible.builtin.meta: flush_handlers
+
+- name: Read back forwarding on the transit interface
+  ansible.builtin.slurp:
+    # Interface names keep their dots in /proc; it is the sysctl NAME that
+    # mangles them to slashes. Read the file to avoid the ambiguity entirely.
+    src: "/proc/sys/net/ipv4/conf/{{ _transit_interface }}/forwarding"
+  register: _transit_forwarding
+  become: true
+
+- name: Assert the transit interface forwards
+  ansible.builtin.assert:
+    that:
+      - (_transit_forwarding.content | b64decode | trim) == '1'
+    fail_msg: >-
+      {{ _transit_interface }} still has forwarding disabled. Return traffic for
+      every tenant is dropped on arrival - the symptom is 100% packet loss in
+      the VM while the exit node's SNAT counter increments.
+    success_msg: "{{ _transit_interface }} forwards; tenant return traffic can be delivered."
+
+# --- The VRF default route --------------------------------------------------
+
+# The tenant list is declared in inventory but the VRFs are created by the
+# tenant factory, so the two can drift. Checking here turns that drift into a
+# named failure instead of a tenant that silently has no egress.
+- name: List the VRFs present on the node
+  ansible.builtin.command: ip -br link show type vrf
+  register: _node_vrfs
+  changed_when: false
+  become: true
+
+- name: Assert every declared tenant has a VRF on the node
+  ansible.builtin.assert:
+    that:
+      - _missing_vrfs | length == 0
+    fail_msg: >-
+      Declared in inventory but not present on {{ proxmox_node }}:
+      {{ _missing_vrfs | join(', ') }}. The tenant factory creates the VRF, so
+      either `terraform apply` has not run for these tenants or the names in
+      proxmox_tenant_egress.tenants do not match their zone IDs.
+    success_msg: "All declared tenant VRFs exist: {{ proxmox_tenant_egress.tenants | join(', ') }}."
+  vars:
+    _missing_vrfs: >-
+      {{ proxmox_tenant_egress.tenants
+         | map('regex_replace', '^', 'vrf_')
+         | reject('in', _node_vrfs.stdout_lines | map('split') | map('first') | list)
+         | list }}
+
+- name: Install the local FRR configuration
+  ansible.builtin.template:
+    src: frr.conf.local.j2
+    dest: /etc/frr/frr.conf.local
+    owner: frr
+    group: frr
+    mode: "0640"
+  become: true
+  notify: regenerate sdn frr configuration
+
+- name: Regenerate the FRR configuration now if the local config changed
+  ansible.builtin.meta: flush_handlers
+
+# --- Verification -----------------------------------------------------------
+#
+# Asserting the outcome rather than the write: the whole point of this file is
+# a routing result, and a template that rendered is not evidence of one.
+
+- name: Read each tenant VRF's routing table
+  ansible.builtin.command: "ip route show vrf vrf_{{ item }}"
+  loop: "{{ proxmox_tenant_egress.tenants }}"
+  register: _vrf_routes
+  changed_when: false
+  become: true
+
+- name: Assert each tenant VRF has its default route
+  ansible.builtin.assert:
+    that:
+      # FRR renders the installed route as
+      #   default nhid 178 via 10.20.50.1 dev vmbr0.50 proto static metric 20
+      # so match the two parts that matter rather than an exact prefix - the
+      # nexthop-group id is assigned at install time and varies.
+      - item.stdout is search('default .*via ' ~ (_transit_gateway | regex_escape))
+    fail_msg: >-
+      vrf_{{ item.item }} has no default via {{ _transit_gateway }}. FRR did not
+      install the leaked route - check `vtysh -c 'show ip route vrf vrf_{{ item.item }}'`
+      and that /etc/frr/frr.conf contains the merged `vrf vrf_{{ item.item }}` stanza.
+    success_msg: "vrf_{{ item.item }}: default via {{ _transit_gateway }}"
+  loop: "{{ _vrf_routes.results }}"
+  loop_control:
+    label: "vrf_{{ item.item }}"
+
+# The assert that actually matters. A default route proves egress works; this
+# proves it leaves the right way. Without it the lookup resolves on-link out
+# the management bridge and the perimeter never sees the traffic.
+- name: Check where management-bound tenant traffic would go
+  ansible.builtin.command: "ip route get {{ _mgmt_probe }} vrf vrf_{{ item }}"
+  loop: "{{ proxmox_tenant_egress.tenants }}"
+  register: _mgmt_lookup
+  changed_when: false
+  become: true
+  vars:
+    _mgmt_probe: >-
+      {{ proxmox_node_network.mgmt.cidr | regex_replace('/.*$', '') }}
+
+- name: Assert management-bound tenant traffic goes to the perimeter
+  ansible.builtin.assert:
+    that:
+      - _transit_interface in item.stdout
+    fail_msg: >-
+      Tenant traffic from vrf_{{ item.item }} toward the management segment
+      would leave via "{{ item.stdout | trim }}" instead of
+      {{ _transit_interface }}. That is the perimeter bypass ADR-0003 exists to
+      close - it means the VRF is falling through to the main routing table.
+    success_msg: "vrf_{{ item.item }}: management-bound traffic leaves via {{ _transit_interface }}."
+  loop: "{{ _mgmt_lookup.results }}"
+  loop_control:
+    label: "vrf_{{ item.item }}"

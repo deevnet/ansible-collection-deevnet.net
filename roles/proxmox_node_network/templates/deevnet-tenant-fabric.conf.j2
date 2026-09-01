@@ -1,0 +1,26 @@
+# {{ ansible_managed }}
+#
+# IPv4 forwarding for the tenant fabric exit node.
+#
+# Linux decides whether to forward a packet from the INGRESS interface's own
+# forwarding flag, not a global one. Proxmox sets `ip-forward on` for the
+# interfaces its SDN config owns - the VNet bridge, the underlay, the VTEP
+# loopback - so tenant traffic leaving the fabric was always forwarded fine.
+#
+# The transit interface is not one of those. It is node substrate, declared in
+# /etc/network/interfaces, and neither Proxmox's SDN generator nor its network
+# API sets a forwarding flag there (the API has no such property, and its
+# parser drops an `ip-forward` line written by hand). It therefore came up with
+# forwarding=0.
+#
+# The effect is a one-way path that looks like a routing bug: requests leave,
+# get SNATed, reach the internet and are answered - the replies were visible on
+# the wire and conntrack held the correct reverse tuple - and then the kernel
+# refuses to forward them back in, because the interface they arrived on has
+# forwarding disabled. A tenant VM sees 100% packet loss while the exit node's
+# SNAT counter climbs.
+#
+# `default` covers interfaces created after boot, which is how the SDN's VRF
+# and VNet devices appear; `all` covers the ones already up when sysctl runs.
+net.ipv4.conf.all.forwarding = {{ 1 if _egress_forwarding else 0 }}
+net.ipv4.conf.default.forwarding = {{ 1 if _egress_forwarding else 0 }}

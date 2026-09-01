@@ -25,3 +25,25 @@
   # additive run for no reason.
   when: _mgmt_routing_installed | default(false) | bool
   listen: apply network configuration
+
+- name: apply fabric sysctls
+  ansible.builtin.command: sysctl --system
+  become: true
+  changed_when: true
+  listen: apply fabric sysctls
+
+# frr.conf.local is an input to Proxmox's generator, not a file FRR reads. It
+# only takes effect when PVE rewrites /etc/frr/frr.conf, so the local config
+# has to be merged before the daemon is told to re-read anything.
+- name: regenerate sdn frr configuration
+  ansible.builtin.command: pvesh set /cluster/sdn
+  become: true
+  changed_when: true
+  listen: regenerate sdn frr configuration
+
+- name: reload frr
+  ansible.builtin.systemd_service:
+    name: frr
+    state: reloaded
+  become: true
+  listen: regenerate sdn frr configuration
