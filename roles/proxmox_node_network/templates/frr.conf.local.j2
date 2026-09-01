@@ -1,0 +1,36 @@
+! {{ ansible_managed }}
+!
+! Tenant egress: a default route inside each tenant VRF, pointing at the
+! perimeter over the transit segment.
+!
+! WHY THIS FILE EXISTS
+!
+! Proxmox generates `default-originate ipv4|ipv6` under
+! `router bgp <asn> vrf vrf_<tenant>`, which ADVERTISES a default to other
+! VTEPs over EVPN. It installs nothing in the exit node's own VRF. On a
+! single-member fabric the only node IS the exit node, so there is no peer to
+! learn from and the VRF holds only its connected route.
+!
+! Proxmox's own answer to that is in EvpnPlugin.pm: on an exit node it deletes
+! the VRF's `unreachable default`, so a lookup that misses falls through to the
+! MAIN table. That does give a tenant the internet - and it also sends
+! tenant traffic bound for the management segment straight out vmbr0, on-link,
+! unSNATed, never touching the perimeter. Measured: five tenant-sourced packets
+! captured on the management VLAN with source 10.20.129.10.
+!
+! An explicit default inside the VRF is what closes that. Every destination the
+! VRF does not connect to leaves via the transit gateway, so the perimeter sees
+! all of it and ADR-0001 seam 1 holds literally rather than approximately.
+! This is policy, not a single-member workaround: the exit node needs it however
+! many members the fabric has.
+!
+! Proxmox merges this file into the config it generates
+! (PVE/Network/SDN/Frr.pm), and its parser folds a bare `vrf <name>` stanza
+! into the generated block rather than duplicating it - so these lines land
+! inside Proxmox's own `vrf vrf_<tenant>` section on every SDN apply.
+{% for tenant in proxmox_tenant_egress.tenants %}
+
+vrf vrf_{{ tenant }}
+ ip route 0.0.0.0/0 {{ _transit_gateway }} nexthop-vrf default
+exit-vrf
+{% endfor %}

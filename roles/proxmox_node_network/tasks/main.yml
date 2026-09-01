@@ -13,6 +13,7 @@
 #   proxmox_token_id/secret  API token with Sys.Modify
 #   proxmox_node_network     bridge + mgmt + vlans topology
 #   proxmox_mgmt_routing     source-based routing for the mgmt address
+#   proxmox_tenant_egress    tenant VRF egress: forwarding + leaked default
 #
 # Tags:
 #   packages       install frr and dnsmasq, the daemons that actually realize
@@ -22,6 +23,9 @@
 #   mgmt-routing   install the source-based routing unit (needs SSH).
 #   default-route  THE RISKY ONE - moves the default route off management.
 #                  Refuses to run unless mgmt-routing is in place first.
+#   tenant-egress  forwarding on the transit interface, and a default route in
+#                  each tenant VRF so egress passes the perimeter rather than
+#                  falling through to the main table (ADR-0003). Needs SSH.
 
 # The playbook targets the hypervisors group, but only a tenant hypervisor
 # carries a fabric attachment. Skipping is the appliance behaviour: inventory
@@ -95,3 +99,8 @@
 - name: Move the default route off the management interface
   ansible.builtin.import_tasks: default_route.yml
   tags: [default-route]
+
+- name: Configure tenant egress
+  ansible.builtin.import_tasks: tenant_egress.yml
+  when: proxmox_tenant_egress.enabled | bool
+  tags: [tenant-egress]

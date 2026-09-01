@@ -6,3 +6,10 @@
 
 - name: Configure Unbound host overrides
   ansible.builtin.include_tasks: configure_unbound.yml
+
+- name: Delegate tenant zones to the tenant DNS server
+  ansible.builtin.include_tasks: configure_domain_overrides.yml
+  when:
+    - dns_tenant_delegation_enabled | bool
+    - groups['tenant_dns'] | default([]) | length > 0
+  tags: [tenant-dns]

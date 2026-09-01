@@ -26,3 +26,16 @@ proxmox_mgmt_routing_unit: deevnet-mgmt-routing
 proxmox_fabric_packages:
   - frr
   - dnsmasq
+
+# Tenant egress. Two node-local settings Proxmox does not model: IPv4
+# forwarding on the transit interface, and a default route inside each tenant
+# VRF pointing at the perimeter. Disabled by default - only a fabric exit node
+# needs either. See tasks/tenant_egress.yml and ADR-0003.
+proxmox_tenant_egress:
+  enabled: false
+  # Tenant names, which are also the SDN zone IDs and the VRF suffixes
+  # (zone 'tdemo' -> vrf_tdemo). Created by the tenant factory; listed here so
+  # the node's routing is declared rather than discovered.
+  tenants: []
+  forwarding: true
+  sysctl_file: /etc/sysctl.d/90-deevnet-tenant-fabric.conf

@@ -14,6 +14,27 @@ dns_record_ttl: 300
 opnsense_api_url: "https://{{ ansible_host }}/api"
 opnsense_validate_certs: false
 
+# Tenant zone delegation (ADR-0004)
+# ------------------------------------------------------------------------------
+# Tenant records are NOT held here. Unbound forwards each tenant zone to the
+# authoritative server that does hold them, so a substrate reconciliation - this
+# role, including dns_delete_unmanaged - cannot reach tenant content.
+dns_tenant_delegation_enabled: true
+
+# Where the tenant zones are served. Resolved from the tenant_dns group rather
+# than written as a literal: ADR-0004 expects the service to move hosts
+# eventually, and consumers should follow it without an edit here.
+dns_tenant_server: >-
+  {{ hostvars[groups['tenant_dns'] | first].env.interfaces.eth0.ip
+     if (groups['tenant_dns'] | default([]) | length > 0)
+     else '' }}
+
+# Where domain overrides live in this OPNsense build's Unbound model. The role
+# asserts these exist before reconciling, so a model change fails loudly rather
+# than quietly delegating nothing.
+dns_domain_override_key: domains
+dns_domain_override_item: domain
+
 # Host records will be built from inventory
 dns_host_records: []
 
