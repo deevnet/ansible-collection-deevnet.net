@@ -29,11 +29,20 @@ dns_tenant_server: >-
      if (groups['tenant_dns'] | default([]) | length > 0)
      else '' }}
 
-# Where domain overrides live in this OPNsense build's Unbound model. The role
-# asserts these exist before reconciling, so a model change fails loudly rather
-# than quietly delegating nothing.
-dns_domain_override_key: domains
-dns_domain_override_item: domain
+# Unbound query-forwarding endpoints, verified against OPNsense 25.7.10.
+#
+# These rows are NOT in unbound/settings/get - that payload has no `domains`
+# collection, which is what an earlier version of this role looked for and why
+# it delegated nothing while appearing to work. They have their own endpoints,
+# and the request body is wrapped in `dot`: one model backs both DNS-over-TLS
+# and plain forward rows, selected by `type`.
+#
+# Kept as variables so a future model rename is a defaults edit rather than a
+# task rewrite; the role asserts the search endpoint answers before reconciling.
+dns_forward_search_endpoint: searchForward
+dns_forward_add_endpoint: addForward
+dns_forward_set_endpoint: setForward
+dns_forward_wrapper: dot
 
 # Host records will be built from inventory
 dns_host_records: []

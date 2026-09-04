@@ -7,6 +7,17 @@
 # to dns_delete_unmanaged - the constraint is met structurally rather than by
 # being careful.
 #
+# API SHAPE, verified against OPNsense 25.7.10 rather than assumed:
+#
+# These are Unbound "Query Forwarding" entries, and they are NOT part of
+# unbound/settings/get. That payload has no `domains` collection at all - its
+# keys are general, advanced, acls, dnsbl, forwarding, dots, hosts, aliases -
+# and `forwarding` is the "use system nameservers" toggle, not a collection.
+# Forward entries live behind their own endpoints (searchForward, addForward,
+# setForward/<uuid>, delForward/<uuid>) and are wrapped in a `dot` object,
+# which serves both DNS-over-TLS and plain forward rows; `type` selects
+# between them and must be "forward" here.
+#
 # Same reconcile shape as configure_unbound.yml: read current state, compare,
 # add or update, never blind-write.
 
@@ -28,57 +39,53 @@
       {% endfor %}
       ]
 
-- name: Get current Unbound configuration
+- name: Fail if the tenant DNS server could not be resolved
+  ansible.builtin.assert:
+    that:
+      - dns_tenant_server | length > 0
+    fail_msg: >-
+      No host in the 'tenant_dns' inventory group, so there is nothing to
+      delegate tenant zones to. Delegating to an empty server would make every
+      tenant name SERVFAIL rather than simply not resolve.
+    success_msg: "Tenant zones delegate to {{ dns_tenant_server }}."
+  when: dns_domain_overrides | length > 0
+
+- name: Read the Unbound query-forwarding entries
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/unbound/settings/get"
-    method: GET
+    url: "{{ opnsense_api_url }}/unbound/settings/{{ dns_forward_search_endpoint }}"
+    method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      current: 1
+      rowCount: 500
     return_content: true
-  register: unbound_domain_config
+  register: unbound_forwards
   delegate_to: localhost
 
-# The domain-override collection has moved between OPNsense releases. Rather
-# than silently reconciling nothing against a shape that is not there, say so.
-- name: Assert the Unbound model exposes domain overrides
+# A build that does not expose this endpoint would silently reconcile nothing
+# and report success, which is how the previous shape went unnoticed. Say so.
+- name: Assert the query-forwarding collection is readable
   ansible.builtin.assert:
     that:
-      - unbound_domain_config.json.unbound[dns_domain_override_key] is defined
+      - unbound_forwards.json.rows is defined
     fail_msg: >-
-      This OPNsense build's unbound/settings/get has no
-      '{{ dns_domain_override_key }}' collection, so tenant zones cannot be
-      delegated. Inspect the payload and set dns_domain_override_key /
-      dns_domain_override_item to match:
-        curl -k -u KEY:SECRET {{ opnsense_api_url }}/unbound/settings/get | jq '.unbound | keys'
-    success_msg: "Unbound exposes '{{ dns_domain_override_key }}'."
+      {{ dns_forward_search_endpoint }} returned no 'rows', so tenant zones
+      cannot be delegated on this OPNsense build. Inspect it with:
+        curl -k -u KEY:SECRET -X POST {{ opnsense_api_url }}/unbound/settings/{{ dns_forward_search_endpoint }}
+    success_msg: >-
+      Unbound exposes {{ unbound_forwards.json.rows | length }} forwarding
+      entries.
 
-- name: Build domain to existing override mapping
+- name: Map existing forwards by domain
   ansible.builtin.set_fact:
     existing_domains: >-
-      {{
-        existing_domains | default({}) | combine({
-          (item.value.domain | string): {
-            'uuid': item.key,
-            'domain': item.value.domain | default(''),
-            'server': item.value.server | default('')
-          }
-        })
-      }}
-  loop: >-
-    {{ (unbound_domain_config.json.unbound[dns_domain_override_key][dns_domain_override_item]
-        | default({})) | dict2items }}
-  loop_control:
-    label: "{{ item.value.domain | default('unknown') }}"
-  when:
-    - unbound_domain_config.json.unbound[dns_domain_override_key][dns_domain_override_item] is mapping
-    - item.value.domain is defined
-
-- name: Ensure existing_domains is defined
-  ansible.builtin.set_fact:
-    existing_domains: {}
-  when: existing_domains is not defined
+      {{ dict(unbound_forwards.json.rows
+              | map(attribute='domain')
+              | zip(unbound_forwards.json.rows)) }}
 
 - name: Categorize delegations
   ansible.builtin.set_fact:
@@ -95,43 +102,58 @@
 
 - name: Add tenant zone delegations
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/unbound/settings/addDomainOverride"
+    url: "{{ opnsense_api_url }}/unbound/settings/{{ dns_forward_add_endpoint }}"
     method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     body_format: json
-    body:
-      domain:
-        enabled: "1"
-        domain: "{{ item.domain }}"
-        server: "{{ item.server }}"
-        description: "{{ item.description }}"
+    # Built as one expression rather than a literal mapping with a templated
+    # key: Ansible does not template dictionary KEYS, so "{{ dns_forward_wrapper }}"
+    # as a key is sent to the API verbatim and the row is silently not created.
+    # "forward", not "dot", as the type: the same model backs DNS-over-TLS rows,
+    # and the default would try to speak TLS to an authoritative server on 53.
+    body: >-
+      {{ { dns_forward_wrapper: {
+             'enabled': '1',
+             'type': 'forward',
+             'domain': item.domain,
+             'server': item.server,
+             'description': item.description } } }}
   loop: "{{ domains_to_add }}"
   loop_control:
     label: "{{ item.domain }} -> {{ item.server }}"
+  register: dns_forward_added
+  # uri cannot know whether a request changed anything, so it reports ok and the
+  # handler never fires - the rows land in the saved config and the running
+  # Unbound is never told. OPNsense answers "saved" when it wrote one.
+  changed_when: "'saved' in (dns_forward_added.json.result | default(''))"
   delegate_to: localhost
   notify: reconfigure unbound
 
 - name: Update tenant zone delegations whose target moved
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/unbound/settings/setDomainOverride/{{ existing_domains[item.domain].uuid }}"
+    url: >-
+      {{ opnsense_api_url }}/unbound/settings/{{ dns_forward_set_endpoint }}/{{ existing_domains[item.domain].uuid }}
     method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     body_format: json
-    body:
-      domain:
-        enabled: "1"
-        domain: "{{ item.domain }}"
-        server: "{{ item.server }}"
-        description: "{{ item.description }}"
+    body: >-
+      {{ { dns_forward_wrapper: {
+             'enabled': '1',
+             'type': 'forward',
+             'domain': item.domain,
+             'server': item.server,
+             'description': item.description } } }}
   loop: "{{ domains_to_update }}"
   loop_control:
     label: "{{ item.domain }} -> {{ item.server }}"
   when: existing_domains[item.domain].server != item.server
+  register: dns_forward_updated
+  changed_when: "'saved' in (dns_forward_updated.json.result | default(''))"
   delegate_to: localhost
   notify: reconfigure unbound

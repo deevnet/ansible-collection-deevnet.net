@@ -7,8 +7,13 @@
 - name: Configure Unbound host overrides
   ansible.builtin.include_tasks: configure_unbound.yml
 
+# import_tasks, not include_tasks: tags on a DYNAMIC include apply to the
+# include statement alone, so `--tags tenant-dns` ran this include and then
+# filtered out every task inside it - the documented way to run this step did
+# nothing at all, silently, and the assert below it never got the chance to
+# fire. A static import propagates the tag to the tasks it pulls in.
 - name: Delegate tenant zones to the tenant DNS server
-  ansible.builtin.include_tasks: configure_domain_overrides.yml
+  ansible.builtin.import_tasks: configure_domain_overrides.yml
   when:
     - dns_tenant_delegation_enabled | bool
     - groups['tenant_dns'] | default([]) | length > 0
