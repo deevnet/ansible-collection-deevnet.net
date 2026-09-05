@@ -139,6 +139,51 @@
   notify: reconfigure dhcp
 
 # Step 6: Delete reservations for MACs with dhcp_reservation: false
+# Reservations this role manages for hosts inventory no longer declares at all.
+# The list above only covers hosts still present that opted out; a host deleted
+# outright kept its reservation forever. Guarded like the DNS prune: only
+# entries carrying dhcp_description_prefix are candidates, so hand-made GUI
+# reservations are never touched.
+- name: Identify managed reservations inventory no longer declares
+  ansible.builtin.set_fact:
+    reservations_undeclared: >-
+      {{
+        existing_maps_by_mac | dict2items
+        | selectattr('value.description', 'defined')
+        | selectattr('value.description', 'search', '^' ~ (dhcp_description_prefix | regex_escape))
+        | rejectattr('key', 'in', dhcp_reservations_to_add | map(attribute='mac') | map('upper') | list)
+        | rejectattr('key', 'in', dhcp_macs_to_remove | default([]))
+        | list
+      }}
+
+- name: Report reservations that are no longer declared
+  ansible.builtin.debug:
+    msg: |
+      Managed reservations not present in inventory:
+      {{ reservations_undeclared | map(attribute='value')
+         | map(attribute='hostname') | list | join(', ') | default('none', true) }}
+      {{ 'These will be DELETED (dhcp_delete_unmanaged is true).'
+         if dhcp_delete_unmanaged | bool
+         else 'These are being LEFT IN PLACE. Set dhcp_delete_unmanaged=true to remove them.' }}
+  when: reservations_undeclared | length > 0
+
+- name: Delete reservations inventory no longer declares
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/del_reservation/{{ item.value.uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    status_code: [200, 201]
+  loop: "{{ reservations_undeclared }}"
+  loop_control:
+    label: "Deleting undeclared: {{ item.value.hostname | default(item.key) }} ({{ item.key }})"
+  when: dhcp_delete_unmanaged | bool
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
 - name: Delete DHCP reservations marked for removal
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/kea/dhcpv4/del_reservation/{{ existing_maps_by_mac[item].uuid }}"

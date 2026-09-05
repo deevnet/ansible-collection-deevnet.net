@@ -13,5 +13,17 @@ dhcp_subnet_uuid: ""
 # Description prefix for managed reservations
 dhcp_description_prefix: "Ansible managed"
 
+# Reconciliation
+# ------------------------------------------------------------------------------
+# The role has always removed reservations for hosts still in inventory that set
+# dhcp_reservation: false. It never removed one for a host deleted from
+# inventory outright, so a retired host kept its reservation forever - the same
+# gap dns_delete_unmanaged closed for DNS.
+#
+# Off by default: it is the only destructive step here, so it is opted into per
+# run. It only ever considers reservations carrying dhcp_description_prefix, so
+# anything created by hand in the GUI is never a candidate.
+dhcp_delete_unmanaged: false
+
 # DHCP reservations will be built from inventory
 dhcp_reservations: []
