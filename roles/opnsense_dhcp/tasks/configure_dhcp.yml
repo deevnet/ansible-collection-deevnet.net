@@ -24,6 +24,9 @@
     return_content: true
   register: dhcp_reservations
   delegate_to: localhost
+  # Read-only: must run in check mode too, or the reconcile below compares
+  # against an empty picture and reports every record as new.
+  check_mode: false
 
 - name: Display current reservations count
   ansible.builtin.debug:
