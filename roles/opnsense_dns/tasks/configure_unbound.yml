@@ -30,6 +30,10 @@
   delegate_to: localhost
 
 # Step 2: Build hostname -> existing override mapping
+  # Read-only: must run in check mode too, or the reconcile below compares
+  # against an empty picture and reports every record as new.
+  check_mode: false
+
 - name: Build hostname to existing override mapping
   ansible.builtin.set_fact:
     existing_overrides_by_hostname: >-
@@ -194,6 +198,10 @@
   when: dns_cname_records | length > 0
 
 # Step 8: Build hostname to UUID mapping for alias target resolution
+  # Read-only: must run in check mode too, or the reconcile below compares
+  # against an empty picture and reports every record as new.
+  check_mode: false
+
 - name: Build hostname to UUID mapping
   ansible.builtin.set_fact:
     hostname_uuid_map: >-

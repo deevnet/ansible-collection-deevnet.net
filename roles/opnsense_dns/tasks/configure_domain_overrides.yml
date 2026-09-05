@@ -68,6 +68,10 @@
 
 # A build that does not expose this endpoint would silently reconcile nothing
 # and report success, which is how the previous shape went unnoticed. Say so.
+  # Read-only: must run in check mode too, or the reconcile below compares
+  # against an empty picture and reports every record as new.
+  check_mode: false
+
 - name: Assert the query-forwarding collection is readable
   ansible.builtin.assert:
     that:
