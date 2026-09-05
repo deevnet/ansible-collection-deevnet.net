@@ -1,9 +1,6 @@
 ---
 # OPNsense DHCP role defaults (Kea DHCP)
 
-# Domain for this substrate (used in descriptions)
-dhcp_domain: "dvntm.deevnet.net"
-
 # OPNsense API settings (typically inherited from group_vars/routers.yml)
 opnsense_api_url: "https://{{ ansible_host }}/api"
 opnsense_validate_certs: false

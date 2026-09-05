@@ -10,7 +10,10 @@
 #   4. For each desired alias:
 #      - If alias exists with different target: update via setHostAlias
 #      - If alias does not exist: add via addHostAlias
-#   5. Optionally delete unmanaged records (controlled by dns_delete_unmanaged)
+#   5. Delete managed records inventory no longer declares, when
+#      dns_delete_unmanaged is true. Off by default: this is the only
+#      destructive step, and it only ever considers records carrying
+#      dns_description_prefix in this role's own dns_domain.
 #   6. Reconfigure Unbound service to apply changes
 
 # Step 1: Get current Unbound configuration
@@ -318,13 +321,95 @@
   changed_when: true
   notify: reconfigure unbound
 
-# Step 12: Report completion
+# Step 12: Delete records this role manages that inventory no longer declares
+#
+# Without this, renaming a host leaves its old record behind forever: the new
+# name is added, the old one is never touched again, and both resolve to the
+# same address. OPNsense derives PTRs from host overrides, so two overrides on
+# one address also makes the reverse lookup ambiguous.
+#
+# Three conditions have to hold before anything is deleted, because this is the
+# only destructive step in the role:
+#
+#   1. The description carries `dns_description_prefix`. Records created by hand
+#      in the GUI do not, and are never candidates.
+#   2. The domain matches `dns_domain`. A resolver holding a second zone keeps
+#      those records regardless.
+#   3. The name is absent from inventory.
+#
+# Aliases go first: an alias points at an override's UUID, so removing the
+# override first would orphan it.
+- name: Identify managed records inventory no longer declares
+  ansible.builtin.set_fact:
+    aliases_to_delete: >-
+      {{
+        existing_aliases_by_name.values()
+        | selectattr('description', 'search', '^' ~ (dns_description_prefix | regex_escape))
+        | selectattr('domain', 'equalto', dns_domain)
+        | rejectattr('hostname', 'in', dns_cname_records | map(attribute='name') | list)
+        | list
+      }}
+    overrides_to_delete: >-
+      {{
+        existing_overrides_by_hostname.values()
+        | selectattr('description', 'search', '^' ~ (dns_description_prefix | regex_escape))
+        | selectattr('domain', 'equalto', dns_domain)
+        | rejectattr('hostname', 'in', dns_host_records | map(attribute='hostname') | list)
+        | list
+      }}
+
+- name: Report records that are no longer declared
+  ansible.builtin.debug:
+    msg: |
+      Managed records not present in inventory:
+      - Aliases:   {{ aliases_to_delete | map(attribute='hostname') | list | join(', ') | default('none', true) }}
+      - Overrides: {{ overrides_to_delete | map(attribute='hostname') | list | join(', ') | default('none', true) }}
+      {{ 'These will be DELETED (dns_delete_unmanaged is true).'
+         if dns_delete_unmanaged | bool
+         else 'These are being LEFT IN PLACE. Set dns_delete_unmanaged=true to remove them.' }}
+  when: (aliases_to_delete | length + overrides_to_delete | length) > 0
+
+- name: Delete aliases inventory no longer declares
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/delHostAlias/{{ item.uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  loop: "{{ aliases_to_delete }}"
+  loop_control:
+    label: "Deleting alias: {{ item.hostname }}.{{ item.domain }}"
+  when: dns_delete_unmanaged | bool
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure unbound
+
+- name: Delete host overrides inventory no longer declares
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/delHostOverride/{{ item.uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  loop: "{{ overrides_to_delete }}"
+  loop_control:
+    label: "Deleting override: {{ item.hostname }}.{{ item.domain }} -> {{ item.ip }}"
+  when: dns_delete_unmanaged | bool
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure unbound
+
+# Step 13: Report completion
 - name: Report DNS configuration results
   ansible.builtin.debug:
     msg: |
       DNS configuration complete (idempotent):
       - Host overrides added: {{ overrides_to_add | length }}
       - Host overrides checked: {{ overrides_to_check | length }}
+      - Host overrides deleted: {{ overrides_to_delete | length if dns_delete_unmanaged | bool else 0 }}
       - Aliases added: {{ aliases_to_add | length }}
       - Aliases checked: {{ aliases_to_check | length }}
+      - Aliases deleted: {{ aliases_to_delete | length if dns_delete_unmanaged | bool else 0 }}
       - Domain: {{ dns_domain }}

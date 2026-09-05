@@ -1,8 +1,10 @@
 ---
 # VyOS DNS role defaults
 
-# Domain for this substrate
-dns_domain: "dvntm.deevnet.net"
+# Domain for this substrate. No default on purpose: a site literal here means a
+# site without an override silently uses the other site's zone. Set it in the
+# site's group_vars.
+dns_domain: ""
 
 # Upstream DNS servers for forwarding
 dns_upstream_servers:

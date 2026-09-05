@@ -1,8 +1,11 @@
 ---
 # OPNsense DNS role defaults
 
-# Domain for this substrate
-dns_domain: "dvntm.deevnet.net"
+# Domain for this substrate. No default on purpose: a site literal here means a
+# site without an override silently publishes into the other site's zone, which
+# is what this role did when it defaulted to dvntm.deevnet.net. Set it in the
+# site's group_vars/routers.
+dns_domain: ""
 
 # Description prefix for Ansible-managed records
 dns_description_prefix: "Ansible managed"
@@ -13,6 +16,18 @@ dns_record_ttl: 300
 # OPNsense API settings
 opnsense_api_url: "https://{{ ansible_host }}/api"
 opnsense_validate_certs: false
+
+# Reconciliation
+# ------------------------------------------------------------------------------
+# Removes records this role manages that inventory no longer declares - the
+# other half of reconciliation, without which a renamed host keeps its old
+# record forever alongside the new one.
+#
+# Off by default: it is the only destructive step in the role, so it is opted
+# into per run. It only ever considers records carrying dns_description_prefix
+# in this role's own dns_domain, so hand-made GUI records and other zones are
+# never candidates.
+dns_delete_unmanaged: false
 
 # Tenant zone delegation (ADR-0004)
 # ------------------------------------------------------------------------------

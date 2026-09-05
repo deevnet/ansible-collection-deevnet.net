@@ -1,6 +1,16 @@
 ---
 # Configure VyOS DHCP server
 
+- name: Assert the DHCP domain is set
+  ansible.builtin.assert:
+    that:
+      - dhcp_domain | default('') | length > 0
+    fail_msg: >-
+      dhcp_domain is not set. It is handed to every DHCP client as
+      option domain-name, so there is no safe default - set it in the site's
+      group_vars.
+    success_msg: "Serving domain-name {{ dhcp_domain }}."
+
 - name: Configure DHCP subnets
   vyos.vyos.vyos_config:
     lines:
