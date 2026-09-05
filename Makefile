@@ -23,7 +23,7 @@ MIGRATION_TS      = $(shell date +%Y%m%d-%H%M%S)
 # Inventory promotion (Step 11) is done, so dvntm carries the target IPs and the
 # staging directory it was promoted from no longer exists. Override only to point
 # at some other inventory.
-MIGRATION_INV     ?= ../ansible-inventory-deevnet/dvntm
+MIGRATION_INV     ?= ../ansible-inventory-deevnet/mobile
 
 # User-level collections (shared across repos)
 USER_COLLECTIONS_PATH    ?= $(HOME)/.ansible/collections
