@@ -20,8 +20,9 @@ MIGRATION_LOG_DIR ?= ./migration-logs
 MIGRATION_TS      = $(shell date +%Y%m%d-%H%M%S)
 
 # Post-cutover migration inventory (target IPs).
-# After inventory promotion (Step 11), dvntm has the target IPs.
-# Before promotion, override with: MIGRATION_INV=../ansible-inventory-deevnet/dvntm-new
+# Inventory promotion (Step 11) is done, so dvntm carries the target IPs and the
+# staging directory it was promoted from no longer exists. Override only to point
+# at some other inventory.
 MIGRATION_INV     ?= ../ansible-inventory-deevnet/dvntm
 
 # User-level collections (shared across repos)

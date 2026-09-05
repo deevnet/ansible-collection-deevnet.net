@@ -24,8 +24,13 @@ A **substrate** is a physical or logical network environment that hosts infrastr
 
 Deevnet includes at least two substrates:
 
-- **dvnt** (home substrate) — `192.168.2.0/24`
-- **dvntm** (mobile substrate) — `192.168.10.0/24`
+- **dvnt** (home substrate) — `10.10.0.0/16`
+- **dvntm** (mobile substrate) — `10.20.0.0/16`
+
+Each site is assigned a `/16` from RFC1918 `10.0.0.0/8`, and segments within it follow
+`10.{site}.{vlan_id}.0/24`. The Addressing architecture page in deevnet-docs is authoritative for
+the full plan, including the split that reserves `10.{site}.128.0/18` for tenant overlays and
+`10.{site}.255.0/24` for fabric loopbacks (ADR-0002).
 
 Each substrate is serviced by its own routing/security boundary (typically its own OPNsense instance) and is treated as an independent environment.
 
