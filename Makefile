@@ -1,5 +1,5 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
-        dns dhcp vyos switch opnsense proxmox-net \
+        dns dhcp switch opnsense proxmox-net \
         preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
         migration-opnsense-assign migration-opnsense-temp-fw \
@@ -65,7 +65,6 @@ help:
 "  dhcp" \
 "      Configure OPNsense DHCP static reservations (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
-"  vyos" \
 "      Configure VyOS routers (DNS, DHCP, firewall)" \
 "" \
 "  switch" \
@@ -163,9 +162,6 @@ opnsense: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/opnsense.yml
 
-vyos: deps install-dev
-	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/vyos-site.yml
 
 # ---------- Inspection ----------
 list:
