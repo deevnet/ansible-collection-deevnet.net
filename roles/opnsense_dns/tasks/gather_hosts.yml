@@ -52,6 +52,39 @@
   loop_control:
     label: "{{ item.1 }} -> {{ item.0.hostname }}"
 
+# The zone every record below is published into. Asserted rather than defaulted:
+# a site literal in defaults/main.yml meant a site without an override published
+# silently into the other site's zone.
+- name: Assert the DNS zone is set
+  ansible.builtin.assert:
+    that:
+      - dns_domain | default('') | length > 0
+    fail_msg: >-
+      dns_domain is not set. Every record this role writes is keyed on it, so
+      there is no safe default - set it in the site's group_vars/routers.
+    success_msg: "Publishing into {{ dns_domain }}."
+
+# Unbound reconciles host overrides by hostname and aliases by alias name, so a
+# duplicate does not error - the later one silently wins, and which one that is
+# depends on ordering. The estate already asserts VMID and MAC uniqueness in
+# deevnet.mgmt vm_identity; this is the same guard for the name namespace.
+#
+# A records and CNAMEs share one namespace: `pve` as both a hostname and an
+# alias is a collision, so they are checked together.
+- name: Assert every DNS name is claimed exactly once
+  ansible.builtin.assert:
+    that:
+      - _dns_all_names | length == _dns_all_names | unique | length
+    fail_msg: >-
+      Two or more hosts claim the same DNS name in {{ dns_domain }}:
+      {{ _dns_all_names | reject('in', _dns_all_names | unique) | list | unique | join(', ') }}.
+      Unbound reconciles by name, so one would silently overwrite the other.
+    success_msg: "All {{ _dns_all_names | length }} DNS names in {{ dns_domain }} are unique."
+  vars:
+    _dns_all_names: >-
+      {{ (dns_host_records | map(attribute='hostname') | list)
+         + (dns_cname_records | map(attribute='name') | list) }}
+
 - name: Display host A records to be configured
   ansible.builtin.debug:
     msg: "DNS A records: {{ dns_host_records | map(attribute='hostname') | list }}"

@@ -2,6 +2,15 @@
 # Build DNS host records from inventory
 # Reads from env.interfaces.<name>.dns flags on each host
 
+- name: Assert the DNS zone is set
+  ansible.builtin.assert:
+    that:
+      - dns_domain | default('') | length > 0
+    fail_msg: >-
+      dns_domain is not set. Every record this role writes is keyed on it, so
+      there is no safe default - set it in the site's group_vars.
+    success_msg: "Publishing into {{ dns_domain }}."
+
 - name: Initialize DNS record lists
   ansible.builtin.set_fact:
     dns_host_records: []
