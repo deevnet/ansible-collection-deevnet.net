@@ -177,7 +177,12 @@
     label: "Checking: {{ item.hostname }}.{{ dns_domain }} ({{ existing_overrides_by_hostname[item.hostname].ip }} -> {{ item.ip }})"
   when:
     - overrides_to_check | length > 0
-    - existing_overrides_by_hostname[item.hostname].ip != item.ip
+    # Domain as well as address. The existing-record map is keyed by hostname
+    # alone, so a record whose zone changed looks unchanged on address and
+    # would never be updated - a zone rename would silently do nothing.
+    - >-
+      existing_overrides_by_hostname[item.hostname].ip != item.ip
+      or existing_overrides_by_hostname[item.hostname].domain != dns_domain
   register: update_override_results
   delegate_to: localhost
   changed_when: true
@@ -323,7 +328,11 @@
   when:
     - aliases_to_check | length > 0
     - hostname_uuid_map[item.target_host] is defined
-    - existing_aliases_by_name[item.name].host_uuid != hostname_uuid_map[item.target_host]
+    # Same reasoning as the host overrides above: an alias that only moved zone
+    # still points at the same target UUID and would otherwise be skipped.
+    - >-
+      existing_aliases_by_name[item.name].host_uuid != hostname_uuid_map[item.target_host]
+      or existing_aliases_by_name[item.name].domain != dns_domain
   register: update_alias_results
   delegate_to: localhost
   changed_when: true
