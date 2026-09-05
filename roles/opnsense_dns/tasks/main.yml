@@ -4,6 +4,16 @@
 - name: Gather DNS records from inventory
   ansible.builtin.include_tasks: gather_hosts.yml
 
+# Before the host overrides, not after: this stops Unbound publishing its own
+# copy of the estate, so the records written below are the only ones in the
+# zone rather than the second set to arrive.
+- name: Stop Unbound publishing names of its own
+  ansible.builtin.include_tasks:
+    file: configure_registration.yml
+    apply:
+      tags: [registration]
+  tags: [registration]
+
 - name: Configure Unbound host overrides
   ansible.builtin.include_tasks: configure_unbound.yml
 

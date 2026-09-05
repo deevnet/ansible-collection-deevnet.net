@@ -1,0 +1,110 @@
+---
+# Unbound self-registration
+#
+# Unbound can publish names on its own, independently of the host overrides
+# this role manages, and by default it does. Left alone it built a complete
+# shadow copy of the estate in a second zone:
+#
+#   10.20.99.21 -> dv02hyp001p01.mobile.deevnet.net.   (this role)
+#                  dv02hyp001p01.deevnet.net.          (Unbound, unasked)
+#
+# and gave the router itself eleven A records - one per VLAN interface - on a
+# name the `dns`, `dhcp` and `gateway` CNAMEs resolve through. Two addresses on
+# one name is the ambiguous multi-A failure ADR-0008 argues against, and it
+# fails as a timeout rather than an error.
+#
+# The names came out in `deevnet.net` rather than the site zone only because
+# regdhcpdomain was empty, so registration fell back to the firewall's system
+# domain. That is a coincidence of configuration, not a safety margin: correct
+# the system domain on its own and the duplicates land directly on top of this
+# role's records instead of beside them.
+#
+# So the fix is not to point registration at the right zone - it is to stop it.
+# Inventory is the single source of these names; anything else publishing them
+# is a second writer to the same zone.
+
+- name: Get current Unbound registration settings
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/get"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+  register: unbound_registration_config
+  delegate_to: localhost
+  # Read-only, and `uri` has no check mode - without this it is skipped under
+  # --check and the comparison below runs against nothing.
+  check_mode: false
+
+- name: Build the desired registration settings
+  ansible.builtin.set_fact:
+    # noregrecords is inverted in the API: 1 means "do NOT register". The
+    # variable is phrased the way an operator thinks about it and flipped here,
+    # once, rather than every reader having to hold the negation.
+    _dns_registration_desired:
+      noregrecords: "{{ dns_register_system_records | bool | ternary('0', '1') }}"
+      regdhcpstatic: "{{ dns_register_dhcp_static | bool | ternary('1', '0') }}"
+      regdhcp: "{{ dns_register_dhcp_leases | bool | ternary('1', '0') }}"
+      regdhcpdomain: "{{ dns_dhcp_registration_domain }}"
+
+- name: Start from an empty change set
+  ansible.builtin.set_fact:
+    _dns_registration_changes: {}
+
+- name: Determine which registration settings differ
+  # Accumulated with combine over a loop rather than built inside a {% %}
+  # template. A template that is not a single {{ }} expression returns a
+  # STRING, so `| length == 0` would have counted characters and the POST body
+  # would have carried a stringified dict - a guard that passes for the wrong
+  # reason, and a request the API cannot parse.
+  #
+  # Both sides are cast to string: the API returns these as strings, and a
+  # value overridden in inventory may arrive as a bool or an int.
+  ansible.builtin.set_fact:
+    _dns_registration_changes: "{{ _dns_registration_changes | combine({item.key: item.value}) }}"
+  loop: "{{ _dns_registration_desired | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: >-
+    (unbound_registration_config.json.unbound.general[item.key] | default('')) | string
+    != item.value | string
+
+- name: Report the registration settings that will change
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Unbound registration already matches inventory'
+         if (_dns_registration_changes | length == 0)
+         else 'Unbound registration will change: '
+              ~ (_dns_registration_changes | dict2items
+                 | map(attribute='key') | join(', ')) }}
+
+- name: Apply the registration settings
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/unbound/settings/set"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    # A partial payload. OPNsense's setAction merges the nodes it is given, so
+    # only the keys above are touched and the rest of the Unbound model - which
+    # GET returns in a shape that cannot be posted back verbatim, select lists
+    # arriving as {selected, value} objects - is left alone.
+    body:
+      unbound:
+        general: "{{ _dns_registration_changes }}"
+  register: _dns_registration_result
+  # The task only runs when there is a difference, so a success here is always
+  # a change. Anything short of `saved` is a failure: OPNsense answers 200 with
+  # result "failed" and a validations block rather than an HTTP error, so a
+  # status check alone would report a silent no-op as success.
+  changed_when: true
+  failed_when: >-
+    _dns_registration_result.status != 200
+    or (_dns_registration_result.json.result | default('')) != 'saved'
+    or (_dns_registration_result.json.validations | default({}) | length > 0)
+  when: _dns_registration_changes | length > 0
+  delegate_to: localhost
+  notify: reconfigure unbound

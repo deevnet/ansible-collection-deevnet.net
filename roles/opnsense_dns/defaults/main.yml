@@ -29,6 +29,25 @@ opnsense_validate_certs: false
 # never candidates.
 dns_delete_unmanaged: false
 
+# Unbound self-registration
+# ------------------------------------------------------------------------------
+# Unbound publishes names of its own unless told not to, and by default it does.
+# That made it a second writer to the same zone: every host ended up with a
+# duplicate record beside the one this role manages, and the router acquired one
+# A record per VLAN interface on a name the service CNAMEs resolve through.
+#
+# Inventory is the single source of these names, so all three registration paths
+# are off. Turning one back on means accepting a second writer.
+dns_register_system_records: false
+dns_register_dhcp_static: false
+dns_register_dhcp_leases: false
+
+# Where registration would publish, if it were ever turned back on. Follows this
+# role's own zone rather than the firewall's system domain, which is what the
+# empty default falls back to - and the reason the duplicates landed in
+# `deevnet.net` instead of on top of the real records.
+dns_dhcp_registration_domain: "{{ dns_domain }}"
+
 # Tenant zone delegation (ADR-0004)
 # ------------------------------------------------------------------------------
 # Tenant records are NOT held here. Unbound forwards each tenant zone to the
