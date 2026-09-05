@@ -11,3 +11,8 @@
 
 # Native VLAN for trunk ports (blackhole — unrouted, drops untagged frames)
 switch_trunk_native_vlan: 999
+
+# The switch's own hostname. ADR-0008 makes a device's name its inventory name,
+# so this follows inventory rather than being restated per host. Overridable for
+# a switch that has to answer to something else.
+switch_hostname: "{{ inventory_hostname }}"

@@ -17,17 +17,41 @@
       group_vars/all/vlans.yml and switch_ports in host_vars/<switch>.yml.
 
 - name: Configure VLANs
-  ansible.builtin.include_tasks: configure_vlans.yml
+  ansible.builtin.include_tasks:
+    file: configure_vlans.yml
+    # A dynamic include does not pass its tags to the tasks inside
+    # it, so `--tags vlans` selected this include and then ran nothing.
+    # `apply` is what pushes the tag down to the children.
+    apply:
+      tags: [vlans]
   tags: [vlans]
 
 - name: Configure trunk ports
-  ansible.builtin.include_tasks: configure_trunk_ports.yml
+  ansible.builtin.include_tasks:
+    file: configure_trunk_ports.yml
+    # A dynamic include does not pass its tags to the tasks inside
+    # it, so `--tags trunk` selected this include and then ran nothing.
+    # `apply` is what pushes the tag down to the children.
+    apply:
+      tags: [trunk]
   tags: [trunk]
 
 - name: Configure access ports
-  ansible.builtin.include_tasks: configure_access_ports.yml
+  ansible.builtin.include_tasks:
+    file: configure_access_ports.yml
+    # A dynamic include does not pass its tags to the tasks inside
+    # it, so `--tags access` selected this include and then ran nothing.
+    # `apply` is what pushes the tag down to the children.
+    apply:
+      tags: [access]
   tags: [access]
 
-- name: Configure management (default gateway)
-  ansible.builtin.include_tasks: configure_management.yml
+- name: Configure management (hostname, default gateway)
+  ansible.builtin.include_tasks:
+    file: configure_management.yml
+    # A dynamic include does not pass its tags to the tasks inside
+    # it, so `--tags mgmt` selected this include and then ran nothing.
+    # `apply` is what pushes the tag down to the children.
+    apply:
+      tags: [mgmt]
   tags: [mgmt]
