@@ -101,6 +101,14 @@
     - "'management' in zone_to_interface"
 
 # Step 3b: Established/related conntrack rules per VLAN interface
+# This builds a plain `pass` rule. It previously also set `quick: true` and
+# `state: "established,related"`, but the addRule body below never sent either
+# field, so they described an intent the router never received. They are removed
+# rather than sent under guessed field names.
+#
+# Whether these rules are needed at all is a separate question worth settling
+# before the policy is first applied: pf creates state on a passing rule by
+# default, so an explicit established/related pass may be redundant.
 - name: Build conntrack rules for each zone
   ansible.builtin.set_fact:
     desired_rules: "{{ desired_rules + [_conntrack_rule] }}"
@@ -117,8 +125,6 @@
       destination_net: ""
       destination_port: ""
       sequence: "{{ _seq | int }}"
-      quick: true
-      state: "established,related"
   loop: "{{ zone_to_interface | dict2items }}"
   loop_control:
     label: "conntrack: {{ item.key }}"
@@ -184,6 +190,23 @@
   ansible.builtin.debug:
     msg: "Desired managed rules: {{ desired_rules | length }}"
 
+# The second half of the guard in discover_interfaces.yml. Discovery can succeed
+# while the desired set still comes out empty - an inventory with no policies, a
+# filtered loop, a variable that did not reach the role. Whatever the cause, a
+# run that wants zero rules on a router that has rules is a wipe, and it is not
+# something to do unattended.
+- name: Assert the desired policy is not empty
+  ansible.builtin.assert:
+    that:
+      - desired_rules | length > 0
+    fail_msg: >-
+      Built 0 desired rules from {{ firewall_zone_policies | length }} declared
+      policies and {{ zone_to_interface | length }} mapped zones. Refusing:
+      applying an empty policy would make every existing managed rule a deletion
+      candidate. Check that firewall_zone_policies and deevnet_vlans reached the
+      role.
+    success_msg: "Built {{ desired_rules | length }} desired rules."
+
 # Step 4: Categorize rules into add / update / delete
 - name: Categorize rules for processing
   ansible.builtin.set_fact:
@@ -203,6 +226,7 @@
       {{
         existing_rules_by_desc | dict2items
         | rejectattr('key', 'in', desired_rules | map(attribute='description') | list)
+        | rejectattr('key', 'in', firewall_protected_descriptions)
         | list
       }}
 
@@ -211,7 +235,8 @@
     msg: |
       Rules to add: {{ rules_to_add | length }}
       Rules to check/update: {{ rules_to_update | length }}
-      Rules to delete: {{ rules_to_delete | length }}
+      Rules undeclared: {{ rules_to_delete | length }}{{ '' if firewall_delete_unmanaged | bool else ' (will be left in place)' }}
+      Protected from deletion: {{ firewall_protected_descriptions | length }}
 
 # Step 5a: Add new rules
 - name: Add new firewall rules
@@ -286,7 +311,22 @@
   changed_when: true
   notify: apply firewall rules
 
-# Step 5c: Delete orphaned managed rules
+# Step 5c: Delete managed rules inventory no longer declares
+#
+# Gated, like opnsense_dns and opnsense_dhcp. This role reconciles by
+# subtraction, so this task is the one capable of removing the policy that
+# carries its own control path - and it is the reason a broken discovery became
+# a site outage rather than a failed play.
+- name: Report rules inventory no longer declares
+  ansible.builtin.debug:
+    msg: |
+      Managed rules not present in inventory:
+      {{ rules_to_delete | map(attribute='key') | list | join(', ') | default('none', true) }}
+      {{ 'These will be DELETED (firewall_delete_unmanaged is true).'
+         if firewall_delete_unmanaged | bool
+         else 'These are being LEFT IN PLACE. Set firewall_delete_unmanaged=true to remove them.' }}
+  when: rules_to_delete | length > 0
+
 - name: Delete orphaned firewall rules
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/firewall/filter/delRule/{{ item.value.uuid }}"
@@ -299,7 +339,9 @@
   loop: "{{ rules_to_delete }}"
   loop_control:
     label: "Deleting: {{ item.key }}"
-  when: rules_to_delete | length > 0
+  when:
+    - firewall_delete_unmanaged | bool
+    - rules_to_delete | length > 0
   register: delete_results
   delegate_to: localhost
   changed_when: true
@@ -312,5 +354,6 @@
       Firewall rule configuration complete:
       - Added: {{ rules_to_add | length }}
       - Checked for updates: {{ rules_to_update | length }}
-      - Deleted: {{ rules_to_delete | length }}
+      - Deleted: {{ rules_to_delete | length if firewall_delete_unmanaged | bool else 0 }}
+      - Undeclared, left in place: {{ 0 if firewall_delete_unmanaged | bool else rules_to_delete | length }}
       - Total desired rules: {{ desired_rules | length }}

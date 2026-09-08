@@ -60,23 +60,47 @@
   register: fw_interfaces
   delegate_to: localhost
 
+# This endpoint answers with JSON but labels it "text/html; charset=UTF-8", so
+# the uri module never populates .json and fw_interfaces.json is undefined.
+# Parsing the body explicitly is what makes the response usable.
+#
+# The failure this caused was silent, which is the dangerous part: with no
+# device map every zone resolved to "unmapped", every rule was filtered out by
+# its `when`, and the role reported ok/changed=0 with "Total desired rules: 0" -
+# reading exactly like a converged run while applying nothing at all. Nothing
+# was deleted either, so the damage was limited to the policy never existing.
+- name: Parse the interface assignments
+  ansible.builtin.set_fact:
+    fw_interface_list: "{{ fw_interfaces.content | from_json }}"
+
 # Step 4: Build device -> interface identifier mapping
+#
+# The endpoint returns a LIST of interface objects, each carrying its own
+# `identifier` and `device`. It was previously read as a dict keyed by
+# identifier, which dict2items cannot do to a list.
+#
+# Entries with an empty identifier are unassigned interfaces and are skipped by
+# design - tenant_underlay is deliberately one of them, since the core router
+# neither routes it nor holds an address on it (ADR-0001).
 - name: Build device to interface mapping
   ansible.builtin.set_fact:
     fw_device_to_interface: >-
       {{
         fw_device_to_interface | default({}) | combine({
-          (item.value.device | default('')): {
-            'identifier': item.key,
-            'device': item.value.device | default('')
+          (item.device): {
+            'identifier': item.identifier,
+            'device': item.device
           }
         })
       }}
-  loop: "{{ fw_interfaces.json | dict2items }}"
+  loop: "{{ fw_interface_list }}"
   loop_control:
-    label: "{{ item.key }} -> {{ item.value.device | default('?') }}"
+    label: "{{ item.identifier | default('?') }} -> {{ item.device | default('?') }}"
   when:
-    - item.value.device is defined
+    - item.device is defined
+    - item.device | length > 0
+    - item.identifier is defined
+    - item.identifier | length > 0
 
 - name: Ensure fw_device_to_interface is defined
   ansible.builtin.set_fact:
@@ -111,6 +135,48 @@
   ansible.builtin.set_fact:
     zone_to_interface: {}
   when: zone_to_interface is not defined
+
+# Discovery is the input the whole reconcile trusts. When it resolves nothing -
+# because the endpoint changed shape, the credential lost a privilege, or the
+# router is mid-reconfigure - every rule is filtered out by its own `when`, the
+# desired set comes out empty, and configure_rules.yml reads that as "inventory
+# declares no rules" rather than "I failed to look". On 2026-09-07 that removed
+# the entire policy while reporting ok/changed=0.
+#
+# There is no legitimate run of this role against a substrate with VLANs where
+# zero zones resolve, so refusing is always right. Partial discovery is refused
+# for the same reason: it would delete exactly the rules for the zones it failed
+# to resolve.
+- name: Assert interface discovery resolved
+  ansible.builtin.assert:
+    that:
+      - fw_interface_list | default([]) | length > 0
+      - zone_to_interface | length > 0
+      - _fw_unresolved_from_zones | length == 0
+    fail_msg: >-
+      Interface discovery resolved {{ zone_to_interface | length }} of
+      {{ deevnet_vlans | length }} zones and will not be used to reconcile.
+      {% if fw_interface_list | default([]) | length == 0 %}The interface export
+      returned nothing - check the API credential and that
+      {{ opnsense_api_url }}/interfaces/overview/export still answers.
+      {% elif _fw_unresolved_from_zones | length > 0 %}These zones are named in
+      firewall_zone_policies but did not resolve to an interface:
+      {{ _fw_unresolved_from_zones | join(', ') }}. Their VLANs may be missing
+      from the router, or unassigned.
+      {% endif %}
+      Refusing rather than building a partial policy: an unresolved zone
+      contributes no rules, and every rule it should have contributed becomes a
+      deletion candidate.
+    success_msg: >-
+      Discovery resolved {{ zone_to_interface | length }} zones; all
+      {{ firewall_zone_policies | map(attribute='from_zone') | unique | length }}
+      policy source zones are mapped.
+  vars:
+    _fw_unresolved_from_zones: >-
+      {{ firewall_zone_policies
+         | map(attribute='from_zone') | unique
+         | reject('in', zone_to_interface)
+         | list }}
 
 - name: Display zone to interface mapping
   ansible.builtin.debug:
