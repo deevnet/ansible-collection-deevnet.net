@@ -136,6 +136,48 @@
     zone_to_interface: {}
   when: zone_to_interface is not defined
 
+# Discovery is the input the whole reconcile trusts. When it resolves nothing -
+# because the endpoint changed shape, the credential lost a privilege, or the
+# router is mid-reconfigure - every rule is filtered out by its own `when`, the
+# desired set comes out empty, and configure_rules.yml reads that as "inventory
+# declares no rules" rather than "I failed to look". On 2026-09-07 that removed
+# the entire policy while reporting ok/changed=0.
+#
+# There is no legitimate run of this role against a substrate with VLANs where
+# zero zones resolve, so refusing is always right. Partial discovery is refused
+# for the same reason: it would delete exactly the rules for the zones it failed
+# to resolve.
+- name: Assert interface discovery resolved
+  ansible.builtin.assert:
+    that:
+      - fw_interface_list | default([]) | length > 0
+      - zone_to_interface | length > 0
+      - _fw_unresolved_from_zones | length == 0
+    fail_msg: >-
+      Interface discovery resolved {{ zone_to_interface | length }} of
+      {{ deevnet_vlans | length }} zones and will not be used to reconcile.
+      {% if fw_interface_list | default([]) | length == 0 %}The interface export
+      returned nothing - check the API credential and that
+      {{ opnsense_api_url }}/interfaces/overview/export still answers.
+      {% elif _fw_unresolved_from_zones | length > 0 %}These zones are named in
+      firewall_zone_policies but did not resolve to an interface:
+      {{ _fw_unresolved_from_zones | join(', ') }}. Their VLANs may be missing
+      from the router, or unassigned.
+      {% endif %}
+      Refusing rather than building a partial policy: an unresolved zone
+      contributes no rules, and every rule it should have contributed becomes a
+      deletion candidate.
+    success_msg: >-
+      Discovery resolved {{ zone_to_interface | length }} zones; all
+      {{ firewall_zone_policies | map(attribute='from_zone') | unique | length }}
+      policy source zones are mapped.
+  vars:
+    _fw_unresolved_from_zones: >-
+      {{ firewall_zone_policies
+         | map(attribute='from_zone') | unique
+         | reject('in', zone_to_interface)
+         | list }}
+
 - name: Display zone to interface mapping
   ansible.builtin.debug:
     msg: "{{ item.key }}: {{ item.value.identifier }} ({{ item.value.device }})"

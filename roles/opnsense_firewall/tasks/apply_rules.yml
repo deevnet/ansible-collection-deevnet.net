@@ -1,0 +1,128 @@
+---
+# Apply the filter ruleset, and prove the result did not sever the control path.
+#
+# The control host reaches this router THROUGH the policy being written, so an
+# apply can remove the path used to correct it - there is no second chance over
+# the network, only a console cable. Two things guard that:
+#
+#   1. A rollback savepoint. The router reverts on its own if cancelRollback
+#      does not arrive, so recovery does not depend on the control host
+#      surviving the change, or on anyone being awake.
+#   2. A reachability check from the control host. If a required path stopped
+#      answering, the savepoint is deliberately left uncancelled - which IS the
+#      rollback - and the play fails.
+#
+# Builds without the savepoint endpoint fall back to a plain apply and say so.
+
+- name: Request a rollback savepoint
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/filter/savepoint"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+    status_code: [200, 201, 400, 401, 403, 404, 405, 500]
+  register: _fw_savepoint
+  failed_when: false
+  changed_when: false
+  delegate_to: localhost
+  when: firewall_use_savepoint | bool
+
+# Parsed out of the raw body rather than .json: several OPNsense endpoints
+# answer with JSON under a text/html content type, which leaves .json undefined.
+# That exact trap is what broke discovery and caused the 2026-09-07 outage.
+- name: Determine whether a savepoint was issued
+  ansible.builtin.set_fact:
+    _fw_revision: >-
+      {{ (_fw_savepoint.content | default('')
+          | regex_search('"revision"\s*:\s*"?([0-9.]+)"?', '\1')
+          | default([], true) | first | default('', true))
+         if (firewall_use_savepoint | bool and _fw_savepoint.status | default(0) in [200, 201])
+         else '' }}
+
+- name: Report that this build offers no rollback savepoint
+  ansible.builtin.debug:
+    msg: >-
+      No rollback savepoint was issued
+      (HTTP {{ _fw_savepoint.status | default('n/a') }}), so this apply is not
+      self-reverting. The reachability check still runs, but recovery from a
+      severed path is manual - see the console recovery runbook. Set
+      firewall_use_savepoint=false to silence this if the build genuinely lacks
+      the endpoint.
+  when:
+    - firewall_use_savepoint | bool
+    - _fw_revision | length == 0
+
+- name: Apply the filter ruleset
+  ansible.builtin.uri:
+    url: >-
+      {{ opnsense_api_url }}/firewall/filter/apply{{ ('/' ~ _fw_revision) if _fw_revision | length > 0 else '' }}
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+  delegate_to: localhost
+
+# From the control host, not from the router: the question is not "did the
+# router accept the ruleset" - it always does - but "can the thing that manages
+# it still get back in".
+- name: Verify the paths that matter still answer
+  ansible.builtin.wait_for:
+    host: "{{ item.host }}"
+    port: "{{ item.port }}"
+    timeout: "{{ firewall_reachability_timeout }}"
+  loop: "{{ firewall_reachability_targets }}"
+  loop_control:
+    label: "{{ item.host }}:{{ item.port }} - {{ item.why | default('required path') }}"
+  register: _fw_reach
+  failed_when: false
+  changed_when: false
+  delegate_to: localhost
+  when: firewall_verify_reachability | bool
+
+- name: Collect any path that stopped answering
+  ansible.builtin.set_fact:
+    _fw_unreachable: >-
+      {{ _fw_reach.results | default([])
+         | selectattr('failed', 'defined') | selectattr('failed')
+         | map(attribute='item')
+         | list }}
+
+# Only once the control path is proven. Leaving this uncancelled is not an
+# error path - it is the mechanism.
+- name: Confirm the applied ruleset and cancel the rollback
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/filter/cancelRollback/{{ _fw_revision }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+  delegate_to: localhost
+  when:
+    - _fw_revision | length > 0
+    - _fw_unreachable | length == 0
+
+- name: Fail because the applied policy severed a required path
+  ansible.builtin.fail:
+    msg: >-
+      The ruleset applied, but {{ _fw_unreachable | length }} required path(s)
+      stopped answering:
+      {{ _fw_unreachable | map(attribute='why') | list | join('; ') }}.
+      {% if _fw_revision | length > 0 %}The rollback savepoint
+      {{ _fw_revision }} was deliberately NOT cancelled - the router reverts to
+      the previous ruleset on its own within
+      {{ firewall_savepoint_timeout }}s. Wait for it rather than re-running.
+      {% else %}No savepoint was in place, so this did NOT revert itself and
+      the router is running the policy that severed the path. Recover at the
+      console.{% endif %}
+  when: _fw_unreachable | length > 0
