@@ -60,23 +60,47 @@
   register: fw_interfaces
   delegate_to: localhost
 
+# This endpoint answers with JSON but labels it "text/html; charset=UTF-8", so
+# the uri module never populates .json and fw_interfaces.json is undefined.
+# Parsing the body explicitly is what makes the response usable.
+#
+# The failure this caused was silent, which is the dangerous part: with no
+# device map every zone resolved to "unmapped", every rule was filtered out by
+# its `when`, and the role reported ok/changed=0 with "Total desired rules: 0" -
+# reading exactly like a converged run while applying nothing at all. Nothing
+# was deleted either, so the damage was limited to the policy never existing.
+- name: Parse the interface assignments
+  ansible.builtin.set_fact:
+    fw_interface_list: "{{ fw_interfaces.content | from_json }}"
+
 # Step 4: Build device -> interface identifier mapping
+#
+# The endpoint returns a LIST of interface objects, each carrying its own
+# `identifier` and `device`. It was previously read as a dict keyed by
+# identifier, which dict2items cannot do to a list.
+#
+# Entries with an empty identifier are unassigned interfaces and are skipped by
+# design - tenant_underlay is deliberately one of them, since the core router
+# neither routes it nor holds an address on it (ADR-0001).
 - name: Build device to interface mapping
   ansible.builtin.set_fact:
     fw_device_to_interface: >-
       {{
         fw_device_to_interface | default({}) | combine({
-          (item.value.device | default('')): {
-            'identifier': item.key,
-            'device': item.value.device | default('')
+          (item.device): {
+            'identifier': item.identifier,
+            'device': item.device
           }
         })
       }}
-  loop: "{{ fw_interfaces.json | dict2items }}"
+  loop: "{{ fw_interface_list }}"
   loop_control:
-    label: "{{ item.key }} -> {{ item.value.device | default('?') }}"
+    label: "{{ item.identifier | default('?') }} -> {{ item.device | default('?') }}"
   when:
-    - item.value.device is defined
+    - item.device is defined
+    - item.device | length > 0
+    - item.identifier is defined
+    - item.identifier | length > 0
 
 - name: Ensure fw_device_to_interface is defined
   ansible.builtin.set_fact:
