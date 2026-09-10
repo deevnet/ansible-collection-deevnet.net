@@ -2,9 +2,38 @@
 # Main entry point for switch_vlans role
 #
 # Configures VLANs and port assignments on TP-Link switches via Cisco CLI.
+#
+# STANDALONE SWITCHES ONLY (ADR-0009). Once a switch is adopted into the Omada
+# controller, the controller applies its configuration from inventory and this
+# role is break-glass: it refuses to run unless switch_vlans_break_glass=true is
+# passed for that run. See defaults/main.yml.
 # Input variables:
 #   deevnet_vlans: dict of VLAN definitions (from group_vars/all/vlans.yml)
 #   switch_ports: dict with trunk/access port definitions (from host_vars/<switch>.yml)
+
+- name: Refuse to configure a controller-managed switch over the CLI (ADR-0009)
+  ansible.builtin.assert:
+    that:
+      - switch_management in ['standalone', 'omada']
+      - switch_management == 'standalone' or switch_vlans_break_glass | bool
+    fail_msg: >-
+      {{ inventory_hostname }} is managed by the Omada controller
+      (switch_management: {{ switch_management }}). For such a switch switch_vlans is
+      break-glass only: the controller applies its configuration from inventory, and a
+      CLI change made here is overwritten at the controller's next provision. If the
+      controller genuinely cannot be used, first return the switch to standalone
+      (forget it in the controller, or factory reset it), then re-run with
+      -e switch_vlans_break_glass=true.
+    quiet: true
+  tags: [always]
+
+- name: Say plainly that this is a break-glass run
+  ansible.builtin.debug:
+    msg: >-
+      BREAK-GLASS: applying {{ inventory_hostname }}'s configuration over the CLI, outside
+      the Omada controller. Adopt it again once the controller is back (ADR-0009).
+  when: switch_management == 'omada' and switch_vlans_break_glass | bool
+  tags: [always]
 
 - name: Validate required variables
   ansible.builtin.assert:
