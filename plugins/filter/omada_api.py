@@ -1,5 +1,10 @@
 """Filter plugin for Omada controller API helpers."""
 
+# The payload below is shaped for the controller's internal web API, used only by
+# playbooks/migration/13-omada-ssids.yml. omada-wireless.yml builds its own body
+# from the documented Open API schema instead (ADR-0009).
+# omada-api: UNDOCUMENTED POST /{omadacId}/api/v2/sites/{siteId}/setting/wlans/{wlanId}/ssids tested-on 6.1.0.19
+
 
 def omada_ssid_payload(vlan_entry, wifi_password, guest=False):
     """Build an Omada SSID creation payload from a VLAN definition.
