@@ -1,8 +1,12 @@
 ---
-# Ongoing switch VLAN management
+# Switch VLAN configuration over the CLI - STANDALONE switches only (ADR-0009)
 #
-# Applies full VLAN configuration (VLANs, trunks, access ports) to switches.
-# Use for day-2 operations after initial migration is complete.
+# Applies full VLAN configuration (VLANs, trunks, access ports) to switches that
+# the Omada controller does not manage. Once a switch is adopted
+# (switch_management: omada), the controller applies the same inventory and this
+# playbook is break-glass: the role refuses to run unless
+# -e switch_vlans_break_glass=true is passed, and that is only for when the
+# controller cannot be used and the switch has been returned to standalone.
 #
 # Secrets are vaulted in inventory (group_vars/switches/vault.yml).
 # Usage:

@@ -1,0 +1,305 @@
+---
+# Omada Open API proof of concept (ADR-0009)
+#
+# Proves that the controller's DOCUMENTED Open API can express what switch_vlans
+# does today, taking everything from inventory: one network (a VLAN from
+# deevnet_vlans) and one switch profile (a trunk shape from switch_ports).
+#
+# Two modes:
+#
+#   plan (default)  No token and no writes. Builds the request bodies from
+#                   inventory, and checks them - and every endpoint this play
+#                   would call - against the spec the RUNNING controller
+#                   publishes at /v3/api-docs.
+#
+#   apply           -e poc_apply=true. Creates the network and the profile,
+#                   reads both back, compares them with inventory, and deletes
+#                   both in an always: block, so a failure part-way still
+#                   cleans up. Touches the controller only: no switch is adopted,
+#                   so no device receives anything.
+#
+# apply needs an Open API client (client-credentials mode) in the vault as
+# vault_omada_openapi_client_id / vault_omada_openapi_client_secret. Creating one
+# requires a global role, which the automation account deliberately lacks, so
+# the Owner creates it once per controller in the web UI:
+#   Global View > Settings > Platform Integration > Open API > Add New App
+#
+# API markers (ADR-0009). Every call site says which kind of endpoint it uses:
+#   omada-api: documented <operationId> spec <controller version>
+#   omada-api: UNDOCUMENTED <path> tested-on <controller version>
+# On a controller upgrade, sweep with:  grep -rn "omada-api: UNDOCUMENTED"
+#
+# Usage:
+#   ansible-playbook playbooks/poc/omada-openapi-poc.yml
+#   ansible-playbook playbooks/poc/omada-openapi-poc.yml -e poc_apply=true
+
+- name: Omada Open API proof of concept
+  hosts: network_controllers
+  gather_facts: false
+  vars:
+    omada_url: "https://localhost:8043"
+    poc_apply: false
+    poc_prefix: "deevnet-poc"
+    poc_network_key: iot_backend              # the network to create, from deevnet_vlans
+    poc_switch: dv02acc001p01
+    poc_port: "gigabitEthernet 1/0/15"        # the trunk shape to express as a profile
+    poc_marked_version: "6.3.0.45"            # the controller version the markers below were checked on
+
+    # Every documented endpoint this play calls. The preflight refuses to run
+    # if any is missing from the running controller's published spec.
+    poc_endpoints:
+      - {method: get, path: "/openapi/v1/{omadacId}/sites"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks/{networkId}"}
+      - {method: delete, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks/{networkId}"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-profiles"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-profiles"}
+      - {method: delete, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-profiles/{profileId}"}
+
+  tasks:
+    # --- Preflight: what is running, and what does it document? --------------
+
+    - name: Read the controller identity
+      # omada-api: UNDOCUMENTED /api/info tested-on 6.3.0.45
+      # Unauthenticated; the only source of omadacId before a token exists.
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/api/info"
+        validate_certs: false
+      register: poc_info
+
+    - name: Note when the controller is not the version the markers were checked on
+      ansible.builtin.debug:
+        msg: >-
+          Controller is {{ poc_info.json.result.controllerVer }}; the markers in this play were
+          checked on {{ poc_marked_version }}. The endpoint check below still protects the
+          documented calls - re-check the UNDOCUMENTED ones by hand.
+      when: poc_info.json.result.controllerVer != poc_marked_version
+
+    - name: Fetch the Open API spec the running controller publishes
+      # omada-api: documented springdoc /v3/api-docs spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/v3/api-docs/00%20All"
+        validate_certs: false
+        timeout: 120
+      register: poc_spec
+
+    - name: Refuse to run if an endpoint this play uses is not documented here
+      ansible.builtin.assert:
+        that:
+          - item.path in poc_spec.json.paths
+          - item.method in poc_spec.json.paths[item.path]
+        fail_msg: >-
+          {{ item.method | upper }} {{ item.path }} is not in the spec published by controller
+          {{ poc_info.json.result.controllerVer }}. It was documented on {{ poc_marked_version }}.
+        quiet: true
+      loop: "{{ poc_endpoints }}"
+      loop_control:
+        label: "{{ item.method | upper }} {{ item.path }}"
+
+    # --- Desired state, from inventory only -------------------------------------
+
+    - name: Derive the network and the profile from inventory
+      ansible.builtin.set_fact:
+        poc_vlan_id: "{{ deevnet_vlans[poc_network_key].vlan_id | int }}"
+        poc_trunk: >-
+          {{ hostvars[poc_switch].switch_ports.trunk
+             | selectattr('interface', 'equalto', poc_port) | first }}
+
+    - name: Build the request bodies
+      ansible.builtin.set_fact:
+        # The native VLAN may not also appear as tagged in an Omada profile, so it
+        # is subtracted here. Inventory lists it in both, and the CLI role relies
+        # on emitting tagged first and untagged second.
+        poc_tagged_vlans: "{{ (poc_trunk.allowed_vlans | map('int') | list) | difference([poc_trunk.native_vlan | int]) }}"
+        # Built as single expressions so the JSON carries real integers and
+        # booleans; a templated leaf inside a YAML mapping stays a string.
+        poc_network_body: >-
+          {{ {'name': poc_prefix ~ '-' ~ poc_network_key,
+              'purpose': 0,
+              'vlan': poc_vlan_id | int,
+              'igmpSnoopEnable': false} }}
+        poc_profile_body: >-
+          {{ {'name': poc_prefix ~ '-' ~ poc_switch ~ '-' ~ (poc_port | regex_replace('[^0-9]+', '-') | trim('-')),
+              'nativeNetworkId': '<id of the network on VLAN ' ~ poc_trunk.native_vlan ~ '>',
+              'tagNetworkIds': ['<id of the network on VLAN ' ~ poc_vlan_id ~ '>'],
+              'spanningTreeEnable': false,
+              'lldpMedEnable': false,
+              'loopbackDetectEnable': false,
+              'portIsolationEnable': false,
+              'poe': 2,
+              'dot1x': 1,
+              'bandWidthCtrlType': 0} }}
+        # The profile fields above are REQUIRED by the schema, so each is a
+        # declared choice rather than an inherited default; they match the
+        # switch as it runs today. purpose 0 = VLAN only (OPNsense is the
+        # gateway); poe 2 = do not modify (the SG2218 has no PoE); dot1x 1 =
+        # force authorized, i.e. no 802.1X.
+
+    - name: Check the trunk's tagged set is exactly the network this PoC creates
+      ansible.builtin.assert:
+        that: poc_tagged_vlans | map('int') | list == [poc_vlan_id | int]
+        fail_msg: >-
+          {{ poc_port }} tags {{ poc_tagged_vlans }}, but this PoC only creates VLAN {{ poc_vlan_id }}.
+          Pick a trunk whose tagged set is that one VLAN, or extend the PoC.
+        quiet: true
+
+    - name: Check the bodies carry every field the published schema requires
+      vars:
+        poc_schema_name: >-
+          {{ (poc_spec.json.paths[item.path].post.requestBody.content.values() | first).schema['$ref']
+             | split('/') | last }}
+        poc_required: "{{ poc_spec.json.components.schemas[poc_schema_name].required | default([]) }}"
+      ansible.builtin.assert:
+        that: poc_required | difference(item.body.keys() | list) | length == 0
+        fail_msg: "{{ item.label }} lacks required fields: {{ poc_required | difference(item.body.keys() | list) }}"
+        success_msg: "{{ item.label }}: all {{ poc_required | length }} required fields present ({{ poc_schema_name }})"
+      loop:
+        - {label: network, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks", body: "{{ poc_network_body }}"}
+        - {label: profile, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-profiles", body: "{{ poc_profile_body }}"}
+      loop_control:
+        label: "{{ item.label }}"
+
+    - name: Show the plan
+      ansible.builtin.debug:
+        msg:
+          controller: "{{ poc_info.json.result.controllerVer }}"
+          mode: "{{ 'apply' if poc_apply | bool else 'plan (no writes)' }}"
+          trunk_in_inventory: "{{ poc_port }} on {{ poc_switch }}: native {{ poc_trunk.native_vlan }}, allowed {{ poc_trunk.allowed_vlans }}"
+          network: "{{ poc_network_body }}"
+          profile: "{{ poc_profile_body }}"
+
+    # --- Apply: create, read back, compare, delete ------------------------------
+
+    - name: Apply against the controller
+      when: poc_apply | bool
+      block:
+        - name: Get an access token with the client credentials
+          # omada-api: documented authorize/token (TP-Link Open API guide; not in the served spec) spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_url }}/openapi/authorize/token?grant_type=client_credentials"
+            method: POST
+            body_format: json
+            body:
+              omadacId: "{{ poc_info.json.result.omadacId }}"
+              client_id: "{{ vault_omada_openapi_client_id }}"
+              client_secret: "{{ vault_omada_openapi_client_secret }}"
+            validate_certs: false
+          register: poc_token
+          failed_when: poc_token.json.errorCode | default(-1) != 0
+          no_log: true
+
+        - name: Set the API base and header
+          ansible.builtin.set_fact:
+            poc_api: "{{ omada_url }}/openapi/v1/{{ poc_info.json.result.omadacId }}"
+            poc_hdr:
+              Authorization: "AccessToken={{ poc_token.json.result.accessToken }}"
+          no_log: true
+
+        - name: List sites
+          # omada-api: documented getSiteList spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ poc_api }}/sites?page=1&pageSize=100"
+            headers: "{{ poc_hdr }}"
+            validate_certs: false
+          register: poc_sites
+          failed_when: poc_sites.json.errorCode != 0
+
+        - name: List the site's networks
+          # omada-api: documented getLanNetworkList spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ poc_api }}/sites/{{ poc_sites.json.result.data[0].siteId }}/lan-networks?page=1&pageSize=100"
+            headers: "{{ poc_hdr }}"
+            validate_certs: false
+          register: poc_networks
+          failed_when: poc_networks.json.errorCode != 0
+
+        - name: Resolve the native network, and refuse if the PoC network already exists
+          ansible.builtin.set_fact:
+            poc_site: "{{ poc_sites.json.result.data[0].siteId }}"
+            poc_native_id: >-
+              {{ (poc_networks.json.result.data | selectattr('vlan', 'defined')
+                  | selectattr('vlan', 'equalto', poc_trunk.native_vlan | int) | first).id }}
+          failed_when: >-
+            poc_networks.json.result.data | selectattr('vlan', 'defined')
+            | selectattr('vlan', 'equalto', poc_vlan_id | int) | list | length > 0
+
+        - name: Create, read back and compare
+          block:
+            - name: Create the network
+              # omada-api: documented createLanNetwork spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ poc_api }}/sites/{{ poc_site }}/lan-networks"
+                method: POST
+                headers: "{{ poc_hdr }}"
+                body_format: json
+                body: "{{ poc_network_body }}"
+                validate_certs: false
+              register: poc_net_created
+              failed_when: poc_net_created.json.errorCode | default(-1) != 0
+
+            - name: Remember the network id
+              ansible.builtin.set_fact:
+                poc_net_id: "{{ poc_net_created.json.result.id | default(poc_net_created.json.id) }}"
+
+            - name: Create the profile
+              # omada-api: documented createLanProfile spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ poc_api }}/sites/{{ poc_site }}/lan-profiles"
+                method: POST
+                headers: "{{ poc_hdr }}"
+                body_format: json
+                body: "{{ poc_profile_body | combine({'nativeNetworkId': poc_native_id, 'tagNetworkIds': [poc_net_id]}) }}"
+                validate_certs: false
+              register: poc_prof_created
+              failed_when: poc_prof_created.json.errorCode | default(-1) != 0
+
+            - name: Remember the profile id
+              ansible.builtin.set_fact:
+                poc_prof_id: "{{ poc_prof_created.json.result.id | default(poc_prof_created.json.id) }}"
+
+            - name: Read the network back
+              # omada-api: documented getLanNetwork spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ poc_api }}/sites/{{ poc_site }}/lan-networks/{{ poc_net_id }}"
+                headers: "{{ poc_hdr }}"
+                validate_certs: false
+              register: poc_net_read
+
+            - name: Read the profiles back
+              # omada-api: documented getLanProfileList spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ poc_api }}/sites/{{ poc_site }}/lan-profiles?page=1&pageSize=100"
+                headers: "{{ poc_hdr }}"
+                validate_certs: false
+              register: poc_prof_read
+
+            - name: Compare what the controller holds with inventory
+              vars:
+                poc_prof: "{{ poc_prof_read.json.result.data | selectattr('id', 'equalto', poc_prof_id) | first }}"
+              ansible.builtin.assert:
+                that:
+                  - poc_net_read.json.result.vlan == poc_vlan_id | int
+                  - poc_net_read.json.result.purpose == 0
+                  - poc_prof.nativeNetworkId == poc_native_id
+                  - poc_prof.tagNetworkIds == [poc_net_id]
+                success_msg: "Controller holds exactly what inventory declared"
+
+          always:
+            - name: Delete the profile
+              # omada-api: documented deleteLanProfile spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ poc_api }}/sites/{{ poc_site }}/lan-profiles/{{ poc_prof_id }}"
+                method: DELETE
+                headers: "{{ poc_hdr }}"
+                validate_certs: false
+              when: poc_prof_id is defined
+
+            - name: Delete the network
+              # omada-api: documented deleteLanNetwork spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ poc_api }}/sites/{{ poc_site }}/lan-networks/{{ poc_net_id }}"
+                method: DELETE
+                headers: "{{ poc_hdr }}"
+                validate_certs: false
+              when: poc_net_id is defined

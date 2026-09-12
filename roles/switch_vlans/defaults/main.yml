@@ -9,6 +9,29 @@
 #   trunk: []
 #   access: []
 
+# Who applies this switch's configuration (ADR-0009).
+#
+#   standalone  switch_vlans applies it over the CLI. Every switch is standalone
+#               until it is adopted into the Omada controller.
+#   omada       The controller applies it, from the same inventory, over its Open
+#               API. switch_vlans then REFUSES to run: a CLI change to a managed
+#               switch diverges from the controller and is overwritten the next
+#               time the controller provisions it.
+#
+# Set to omada in host_vars/<switch> as part of adopting the switch.
+switch_management: standalone
+
+# Break-glass override. ONLY for when the controller cannot be used, and only
+# after the switch has been returned to standalone (forgotten in the controller,
+# or factory reset):
+#
+#   ansible-playbook playbooks/switch-vlans.yml -e switch_vlans_break_glass=true
+#
+# The switch then runs from inventory without the controller. Adopting it again
+# afterwards brings it back under the controller, which re-applies the same
+# inventory. Never set this in inventory; it is a per-run flag.
+switch_vlans_break_glass: false
+
 # Native VLAN for trunk ports (blackhole — unrouted, drops untagged frames)
 switch_trunk_native_vlan: 999
 

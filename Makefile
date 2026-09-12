@@ -68,7 +68,8 @@ help:
 "      Configure VyOS routers (DNS, DHCP, firewall)" \
 "" \
 "  switch" \
-"      Configure switch VLANs (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
+"      Configure switch VLANs over the CLI - standalone switches only; break-glass once a switch" \
+"      is controller-managed (ADR-0009). Decrypt inventory vault files first." \
 "" \
 "  proxmox-net [TAGS=...]" \
 "      Configure a tenant hypervisor's bridge and VLAN sub-interfaces via the PVE API." \
