@@ -1,0 +1,429 @@
+---
+# Site wireless from inventory, through the Omada Open API (ADR-0009, CHG-0005)
+#
+# Inventory is the only declaration (ADR-0009); the controller applies it:
+#
+#   networks  one LAN network per deevnet_vlans segment that has a wifi_ssid,
+#             matched on VLAN id - so the networks created by hand-era tooling
+#             are recognised, whatever they are called
+#   SSIDs     one per segment with a wifi_ssid, in the site's primary WLAN group,
+#             matched on name, keyed from deevnet_wifi_psk[<segment>], tagged to
+#             the segment's network
+#   the AP    once adopted: its name and static address, from
+#             host_vars/<omada_ap_host>. An adopted AP joins the site's primary
+#             WLAN group, which is where the SSIDs above are created.
+#
+# Modes:
+#
+#   plan (default)   No writes. Checks every endpoint against the spec the RUNNING
+#                    controller publishes, builds the desired state from inventory,
+#                    and - when the Open API client is in the vault - reads the
+#                    controller and reports what apply would add, what differs,
+#                    and what the controller holds that inventory does not declare.
+#   apply            -e omada_apply=true. Creates what is missing, then sets the
+#                    AP if it is adopted, then re-reads and verifies.
+#   adopt            -e omada_apply=true -e omada_adopt=true. Also adopts the AP
+#                    if it is pending, with its standalone credentials, and waits
+#                    for it to connect.
+#
+# Guards, after INC-0001:
+#   - an empty desired set is refused, and so is a wireless segment with no key;
+#   - nothing is ever deleted - objects inventory does not declare are reported
+#     and left in place, and existing objects that differ are reported, not
+#     rewritten;
+#   - the AP's address is only ever set to the one inventory declares, which is
+#     the one OPNsense reserves for it, and the AP must answer there afterwards.
+#
+# Needs, in group_vars/network_controllers/vault.yml:
+#   vault_omada_openapi_client_id / _secret   Open API client (client credentials),
+#                                             created once by the Owner in the UI
+#   vault_wap_standalone_user / _password     only for -e omada_adopt=true
+#
+# API markers (ADR-0009). On a controller upgrade:  grep -rn "omada-api: UNDOCUMENTED"
+#
+# Usage:
+#   ansible-playbook playbooks/omada-wireless.yml
+#   ansible-playbook playbooks/omada-wireless.yml -e omada_apply=true
+#   ansible-playbook playbooks/omada-wireless.yml -e omada_apply=true -e omada_adopt=true
+
+- name: Site wireless from inventory, through the Omada Open API
+  hosts: network_controllers
+  gather_facts: false
+  vars:
+    omada_url: "https://localhost:8043"
+    omada_apply: false
+    omada_adopt: false
+    omada_marked_version: "6.3.0.45"
+    omada_ap_host: dv02wap001p01
+    omada_adopt_timeout: 300                  # seconds to wait for the AP to connect
+
+    # The SSID settings CHG-0001's hand-configured SSIDs and the March migration
+    # playbook used, kept so the controller-provisioned SSIDs behave the same.
+    omada_ssid_base:
+      band: 3                  # 2.4 + 5 GHz
+      deviceType: 1            # EAPs only
+      broadcast: true
+      security: 3              # WPA-Personal
+      enable11r: false
+      pmfMode: 3               # PMF disabled
+      mloEnable: false
+      hidePwd: true            # do not show the key in the controller UI
+      vlanEnable: true
+
+    omada_endpoints:
+      - {method: get, path: "/openapi/v1/{omadacId}/sites"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}/start-adopt"}
+      - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/general-config"}
+      - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ip-setting"}
+
+  tasks:
+    # --- Preflight --------------------------------------------------------------
+
+    - name: Read the controller identity
+      # omada-api: UNDOCUMENTED /api/info tested-on 6.3.0.45
+      # Unauthenticated; the only source of omadacId before a token exists.
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/api/info"
+        validate_certs: false
+      register: omada_info
+
+    - name: Note when the controller is not the version the markers were checked on
+      ansible.builtin.debug:
+        msg: >-
+          Controller is {{ omada_info.json.result.controllerVer }}; this play's markers were
+          checked on {{ omada_marked_version }}. The endpoint check protects the documented
+          calls; re-test the UNDOCUMENTED one by hand.
+      when: omada_info.json.result.controllerVer != omada_marked_version
+
+    - name: Fetch the Open API spec the running controller publishes
+      # omada-api: documented springdoc /v3/api-docs spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/v3/api-docs/00%20All"
+        validate_certs: false
+        timeout: 120
+      register: omada_spec
+
+    - name: Refuse to run if an endpoint this play uses is not documented here
+      ansible.builtin.assert:
+        that:
+          - item.path in omada_spec.json.paths
+          - item.method in omada_spec.json.paths[item.path]
+        fail_msg: >-
+          {{ item.method | upper }} {{ item.path }} is not in the spec published by controller
+          {{ omada_info.json.result.controllerVer }}.
+        quiet: true
+      loop: "{{ omada_endpoints }}"
+      loop_control:
+        label: "{{ item.method | upper }} {{ item.path }}"
+
+    # --- Desired state, from inventory only ---------------------------------------
+
+    - name: Derive the wireless segments and the AP from inventory
+      vars:
+        _ap_if: "{{ hostvars[omada_ap_host].env.interfaces.eth0 }}"
+      ansible.builtin.set_fact:
+        omada_segments: >-
+          {{ deevnet_vlans | dict2items | selectattr('value.wifi_ssid', 'defined') | list }}
+        omada_ap:
+          name: "{{ omada_ap_host }}"
+          mac: "{{ hostvars[omada_ap_host].infrastructure.interfaces.eth0.mac | upper | replace(':', '-') }}"
+          ip: "{{ _ap_if.ip }}"
+          gateway: "{{ _ap_if.gateway | default(deevnet_vlans[_ap_if.segment].gateway) }}"
+          netmask: "255.255.255.0"
+          dns: "{{ _ap_if.gateway | default(deevnet_vlans[_ap_if.segment].gateway) }}"
+
+    - name: Refuse an empty desired set, or a wireless segment without a key
+      ansible.builtin.assert:
+        that:
+          - omada_segments | length > 0
+          - omada_segments | map(attribute='key') | reject('in', deevnet_wifi_psk.keys() | list) | list | length == 0
+        fail_msg: >-
+          Refusing to reconcile: no segment in deevnet_vlans declares a wifi_ssid, or
+          {{ omada_segments | map(attribute='key') | reject('in', deevnet_wifi_psk.keys() | list) | list }}
+          has no key in deevnet_wifi_psk. An empty or partial desired set is a failure, not a
+          converged state (INC-0001).
+        quiet: true
+
+    - name: Refuse a key the controller would reject (8-63 characters)
+      ansible.builtin.assert:
+        that:
+          - deevnet_wifi_psk[item.key] | length >= 8
+          - deevnet_wifi_psk[item.key] | length <= 63
+        quiet: true
+      loop: "{{ omada_segments }}"
+      no_log: true
+
+    - name: Show the desired state
+      ansible.builtin.debug:
+        msg:
+          controller: "{{ omada_info.json.result.controllerVer }}"
+          mode: "{{ ('apply' ~ (' + adopt' if omada_adopt | bool else '')) if omada_apply | bool else 'plan (no writes)' }}"
+          ssids: "{{ omada_segments | map(attribute='value.wifi_ssid') | zip(omada_segments | map(attribute='value.vlan_id')) | map('join', ' -> VLAN ') | list }}"
+          ap: "{{ omada_ap }}"
+
+    # --- Current state (needs the Open API client) --------------------------------
+
+    - name: Stop here in plan mode when there is no Open API client yet
+      ansible.builtin.meta: end_play
+      when:
+        - vault_omada_openapi_client_id is not defined or vault_omada_openapi_client_secret is not defined
+        - not omada_apply | bool
+
+    - name: Refuse to apply without the Open API client
+      ansible.builtin.assert:
+        that:
+          - vault_omada_openapi_client_id is defined
+          - vault_omada_openapi_client_secret is defined
+        fail_msg: >-
+          No Open API client in the vault. The Owner creates one in the controller (Global View >
+          Settings > Platform Integration > Open API); store it as vault_omada_openapi_client_id /
+          vault_omada_openapi_client_secret in group_vars/network_controllers/vault.yml.
+        quiet: true
+
+    - name: Get an access token with the client credentials
+      # omada-api: documented authorize/token (TP-Link Open API guide; not in the served spec) spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/openapi/authorize/token?grant_type=client_credentials"
+        method: POST
+        body_format: json
+        body:
+          omadacId: "{{ omada_info.json.result.omadacId }}"
+          client_id: "{{ vault_omada_openapi_client_id }}"
+          client_secret: "{{ vault_omada_openapi_client_secret }}"
+        validate_certs: false
+      register: omada_token
+      failed_when: omada_token.json.errorCode | default(-1) != 0
+      no_log: true
+
+    - name: Set the API base and header
+      ansible.builtin.set_fact:
+        omada_api: "{{ omada_url }}/openapi/v1/{{ omada_info.json.result.omadacId }}"
+        omada_hdr:
+          Authorization: "AccessToken={{ omada_token.json.result.accessToken }}"
+      no_log: true
+
+    - name: List sites
+      # omada-api: documented getSiteList spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_api }}/sites?page=1&pageSize=100"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: omada_sites
+      failed_when: omada_sites.json.errorCode != 0 or omada_sites.json.result.data | length != 1
+
+    - name: Remember the site
+      ansible.builtin.set_fact:
+        omada_site: "{{ omada_api }}/sites/{{ omada_sites.json.result.data[0].siteId }}"
+
+    - name: Read networks, WLAN groups and devices
+      # omada-api: documented getLanNetworkList, getWlanGroupList, getSiteDeviceList spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_site }}/{{ item }}"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      loop:
+        - "lan-networks?page=1&pageSize=100"
+        - "wireless-network/wlans"
+        - "devices?page=1&pageSize=100"
+      register: omada_read
+      failed_when: omada_read.json.errorCode | default(-1) != 0
+
+    - name: Pick the primary WLAN group
+      ansible.builtin.set_fact:
+        omada_networks: "{{ omada_read.results[0].json.result.data }}"
+        omada_wlan: "{{ omada_read.results[1].json.result | selectattr('primary', 'defined') | selectattr('primary') | first }}"
+        omada_devices: "{{ omada_read.results[2].json.result.data }}"
+
+    - name: Read the SSIDs in that group
+      # omada-api: documented getSsidList spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids?page=1&pageSize=100"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: omada_ssids_read
+      failed_when: omada_ssids_read.json.errorCode != 0
+
+    - name: Compare the controller with inventory
+      vars:
+        _declared_vlans: "{{ omada_segments | map(attribute='value.vlan_id') | map('int') | list }}"
+        _declared_names: "{{ omada_segments | map(attribute='value.wifi_ssid') | list }}"
+        _have_vlans: "{{ omada_networks | selectattr('vlan', 'defined') | map(attribute='vlan') | map('int') | list }}"
+        _have_ssids: "{{ omada_ssids_read.json.result.data }}"
+      ansible.builtin.set_fact:
+        omada_networks_missing: "{{ omada_segments | rejectattr('value.vlan_id', 'in', _have_vlans) | list }}"
+        omada_ssids_missing: "{{ omada_segments | rejectattr('value.wifi_ssid', 'in', _have_ssids | map(attribute='name') | list) | list }}"
+        omada_ssids_undeclared: "{{ _have_ssids | rejectattr('name', 'in', _declared_names) | map(attribute='name') | list }}"
+        omada_ap_device: "{{ omada_devices | selectattr('mac', 'equalto', omada_ap.mac) | first | default({}) }}"
+
+    - name: Find declared SSIDs whose VLAN differs from inventory
+      vars:
+        _declared: "{{ omada_segments | map(attribute='value') | items2dict(key_name='wifi_ssid', value_name='vlan_id') }}"
+      ansible.builtin.set_fact:
+        omada_ssids_differ: "{{ omada_ssids_differ | default([]) + [item.name ~ ' is VLAN ' ~ (item.vlanId | default('none')) ~ ', inventory says ' ~ _declared[item.name]] }}"
+      loop: "{{ omada_ssids_read.json.result.data | selectattr('name', 'in', _declared.keys() | list) | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: (item.vlanId | default(0) | int) != (_declared[item.name] | int)
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          wlan_group: "{{ omada_wlan.name }}"
+          networks_to_create: "{{ omada_networks_missing | map(attribute='value.vlan_id') | list }}"
+          ssids_to_create: "{{ omada_ssids_missing | map(attribute='value.wifi_ssid') | list }}"
+          ssids_that_differ_left_alone: "{{ omada_ssids_differ | default([]) }}"
+          ssids_not_in_inventory_left_in_place: "{{ omada_ssids_undeclared }}"
+          ap: >-
+            {{ omada_ap.mac }}:
+            {{ {0: 'disconnected', 1: 'connected', 2: 'pending', 3: 'heartbeat missed', 4: 'isolated'}[omada_ap_device.status]
+               if omada_ap_device else 'not seen by the controller' }}
+
+    # --- Apply --------------------------------------------------------------------
+
+    - name: Apply
+      when: omada_apply | bool
+      block:
+        - name: Create the missing networks
+          # omada-api: documented createLanNetwork spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/lan-networks"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body: "{{ {'name': item.key, 'purpose': 0, 'vlan': item.value.vlan_id | int, 'igmpSnoopEnable': false} }}"
+            validate_certs: false
+          loop: "{{ omada_networks_missing }}"
+          loop_control:
+            label: "VLAN {{ item.value.vlan_id }} ({{ item.key }})"
+          register: omada_net_created
+          failed_when: omada_net_created.json.errorCode | default(-1) != 0
+
+        - name: Re-read the networks, to resolve each segment's network id
+          # omada-api: documented getLanNetworkList spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/lan-networks?page=1&pageSize=100"
+            headers: "{{ omada_hdr }}"
+            validate_certs: false
+          register: omada_networks_now
+          failed_when: omada_networks_now.json.errorCode != 0
+
+        - name: Create the missing SSIDs, each tagged to its segment's network
+          # omada-api: documented createSsid spec 6.3.0.45
+          vars:
+            _net: >-
+              {{ omada_networks_now.json.result.data | selectattr('vlan', 'defined')
+                 | selectattr('vlan', 'equalto', item.value.vlan_id | int) | first }}
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body: >-
+              {{ omada_ssid_base | combine({
+                   'name': item.value.wifi_ssid,
+                   'guestNetEnable': item.key == 'guest',
+                   'vlanId': item.value.vlan_id | int,
+                   'vlanSetting': {'mode': 1, 'customConfig': {'customMode': 0, 'lanNetworkId': _net.id}},
+                   'pskSetting': {'securityKey': deevnet_wifi_psk[item.key], 'versionPsk': 2,
+                                  'encryptionPsk': 3, 'gikRekeyPskEnable': false}}) }}
+            validate_certs: false
+          loop: "{{ omada_ssids_missing }}"
+          loop_control:
+            label: "{{ item.value.wifi_ssid }} -> VLAN {{ item.value.vlan_id }}"
+          register: omada_ssid_created
+          failed_when: omada_ssid_created.json.errorCode | default(-1) != 0
+          no_log: true
+
+        - name: Adopt the AP if it is pending
+          when:
+            - omada_adopt | bool
+            - omada_ap_device.status | default(-1) == 2
+          block:
+            - name: Start adopting the AP with its standalone credentials
+              # omada-api: documented adoptDevice spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ omada_site }}/devices/{{ omada_ap.mac }}/start-adopt"
+                method: POST
+                headers: "{{ omada_hdr }}"
+                body_format: json
+                body:
+                  username: "{{ vault_wap_standalone_user }}"
+                  password: "{{ vault_wap_standalone_password }}"
+                validate_certs: false
+              register: omada_adopt_started
+              failed_when: omada_adopt_started.json.errorCode | default(-1) != 0
+              no_log: true
+
+            - name: Wait for the AP to connect
+              # omada-api: documented getSiteDeviceList spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ omada_site }}/devices?page=1&pageSize=100"
+                headers: "{{ omada_hdr }}"
+                validate_certs: false
+              register: omada_devices_now
+              until: >-
+                (omada_devices_now.json.result.data | selectattr('mac', 'equalto', omada_ap.mac)
+                 | map(attribute='status') | first | default(-1)) == 1
+              retries: "{{ (omada_adopt_timeout | int / 10) | int }}"
+              delay: 10
+
+            - name: Remember that the AP is adopted
+              ansible.builtin.set_fact:
+                omada_ap_device: "{{ omada_devices_now.json.result.data | selectattr('mac', 'equalto', omada_ap.mac) | first }}"
+
+        - name: Set the AP from inventory, once it is adopted
+          when: omada_ap_device.status | default(-1) == 1
+          block:
+            - name: Name the AP after its inventory host
+              # omada-api: documented modifyGeneralConfig_2 spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ omada_site }}/aps/{{ omada_ap.mac }}/general-config"
+                method: PATCH
+                headers: "{{ omada_hdr }}"
+                body_format: json
+                body: {name: "{{ omada_ap.name }}"}
+                validate_certs: false
+              register: omada_ap_named
+              failed_when: omada_ap_named.json.errorCode | default(-1) != 0
+
+            - name: Give the AP its inventory address, statically
+              # omada-api: documented modifyIpSettingConfig spec 6.3.0.45
+              ansible.builtin.uri:
+                url: "{{ omada_site }}/aps/{{ omada_ap.mac }}/ip-setting"
+                method: PATCH
+                headers: "{{ omada_hdr }}"
+                body_format: json
+                body:
+                  mode: Static
+                  staticIpSetting:
+                    configIp: "{{ omada_ap.ip }}"
+                    configMask: "{{ omada_ap.netmask }}"
+                    configGate: "{{ omada_ap.gateway }}"
+                    preferredDNS: "{{ omada_ap.dns }}"
+                validate_certs: false
+              register: omada_ap_ip
+              failed_when: omada_ap_ip.json.errorCode | default(-1) != 0
+
+            - name: The AP must answer at its inventory address
+              ansible.builtin.wait_for:
+                host: "{{ omada_ap.ip }}"
+                port: 443
+                timeout: 120
+
+        - name: Verify every declared SSID is now on the controller
+          # omada-api: documented getSsidList spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids?page=1&pageSize=100"
+            headers: "{{ omada_hdr }}"
+            validate_certs: false
+          register: omada_ssids_after
+          failed_when: >-
+            omada_ssids_after.json.errorCode != 0 or
+            (omada_segments | map(attribute='value.wifi_ssid')
+             | reject('in', omada_ssids_after.json.result.data | map(attribute='name') | list) | list | length) > 0

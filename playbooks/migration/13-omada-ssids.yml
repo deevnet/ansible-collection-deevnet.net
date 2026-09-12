@@ -5,6 +5,11 @@
 #
 # Creates WiFi SSIDs for each VLAN with wifi_ssid defined in deevnet_vlans.
 # WiFi PSKs come from deevnet_wifi_psk in vault (group_vars/all/vault.yml).
+#
+# SUPERSEDED by playbooks/omada-wireless.yml, which does the same through the
+# documented Open API (ADR-0009). Kept as the record of what CHG-0001 ran; it is
+# retired once omada-wireless.yml has run for real (CHG-0005). Every call below
+# is to the controller's internal web API, and marked so a version bump finds it.
 
 - name: "Migration Step 13: Configure Omada SSIDs"
   hosts: network_controllers
@@ -15,6 +20,7 @@
   tasks:
     # --- Login and save session cookie ---
     - name: Login to Omada controller
+      # omada-api: UNDOCUMENTED POST /api/v2/login tested-on 6.1.0.19
       ansible.builtin.command:
         cmd: >
           curl -sk -c {{ _cookie_file }}
@@ -41,6 +47,7 @@
 
     # --- Get site ID ---
     - name: Get sites
+      # omada-api: UNDOCUMENTED GET /{omadacId}/api/v2/sites tested-on 6.1.0.19
       ansible.builtin.command:
         cmd: >
           curl -sk -b {{ _cookie_file }}
@@ -55,6 +62,7 @@
 
     # --- Get default WLAN group ---
     - name: Get WLAN groups
+      # omada-api: UNDOCUMENTED GET /{omadacId}/api/v2/sites/{siteId}/setting/wlans tested-on 6.1.0.19
       ansible.builtin.command:
         cmd: >
           curl -sk -b {{ _cookie_file }}
@@ -69,6 +77,7 @@
 
     # --- Get existing SSIDs ---
     - name: Get existing SSIDs
+      # omada-api: UNDOCUMENTED GET /{omadacId}/api/v2/sites/{siteId}/setting/wlans/{wlanId}/ssids tested-on 6.1.0.19
       ansible.builtin.command:
         cmd: >
           curl -sk -b {{ _cookie_file }}
@@ -99,6 +108,7 @@
         msg: "Creating {{ _ssids_to_create | length }} SSIDs: {{ _ssids_to_create | map(attribute='value.wifi_ssid') | list }}"
 
     - name: Create SSIDs
+      # omada-api: UNDOCUMENTED POST /{omadacId}/api/v2/sites/{siteId}/setting/wlans/{wlanId}/ssids tested-on 6.1.0.19
       ansible.builtin.command:
         cmd: >
           curl -sk -b {{ _cookie_file }}
