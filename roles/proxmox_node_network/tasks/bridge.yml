@@ -35,6 +35,14 @@
       bridge_ports: "{{ _bridge.bridge_ports | default(omit) }}"
       bridge_vlan_aware: "{{ 1 if proxmox_node_network.bridge.vlan_aware | default(true) else 0 }}"
       bridge_vids: "{{ proxmox_node_network.bridge.vids | default('2-4094') }}"
+      # Carried through from what the API just reported. A PUT replaces the
+      # interface definition, so omitting these drops the address and PVE
+      # records the bridge as `manual` - the node then rests on address lines
+      # that its method no longer claims. Seen on dv02hyp001p01 in CHG-0008
+      # Step 4, where the bridge kept working but read `inet manual`.
+      # `omit` covers a bridge that genuinely has neither.
+      cidr: "{{ _bridge.cidr | default(omit) }}"
+      gateway: "{{ _bridge.gateway | default(omit) }}"
       autostart: 1
     status_code: [200]
   delegate_to: localhost
