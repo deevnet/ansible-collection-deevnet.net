@@ -35,6 +35,12 @@ switch_vlans_break_glass: false
 # Native VLAN for trunk ports (blackhole — unrouted, drops untagged frames)
 switch_trunk_native_vlan: 999
 
+# LLDP, globally. Declared per switch in host_vars as true or false; left unset,
+# the role does not touch it and the switch keeps whatever its firmware defaults
+# to. That default changed under us once - LLDP is on by default from SG2218
+# 1.20.4 - so a switch should declare it rather than inherit it (CHG-0006).
+switch_lldp: null
+
 # The switch's own hostname. ADR-0008 makes a device's name its inventory name,
 # so this follows inventory rather than being restated per host. Overridable for
 # a switch that has to answer to something else.
