@@ -75,7 +75,7 @@
       tags: [access]
   tags: [access]
 
-- name: Configure management (hostname, default gateway)
+- name: Configure management (hostname, default gateway, LLDP)
   ansible.builtin.include_tasks:
     file: configure_management.yml
     # A dynamic include does not pass its tags to the tasks inside

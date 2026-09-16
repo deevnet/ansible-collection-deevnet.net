@@ -1,5 +1,5 @@
 ---
-# Configure switch management identity: hostname and default gateway
+# Configure switch management: hostname, default gateway and LLDP
 #
 # Reads gateway from env.interfaces.eth0.gateway in host_vars.
 # Only runs if the gateway is defined.
@@ -47,5 +47,31 @@
     - "ip route 0.0.0.0 0.0.0.0 {{ env.interfaces.eth0.gateway }}"
     - "end"
   when: env.interfaces.eth0.gateway is defined
+  changed_when: true
+  notify: write memory
+
+# LLDP
+# -----------------------------------------------------------------------------
+# Only when inventory declares it (switch_lldp true/false). Enabled, the switch
+# renders a bare `lldp` line in its running config; it is absent when disabled.
+# Compared like the hostname, so an unchanged setting does not write flash.
+
+- name: Validate the LLDP declaration
+  ansible.builtin.assert:
+    that:
+      - switch_lldp is boolean
+    fail_msg: "switch_lldp must be true or false (or left unset to leave LLDP alone)"
+  when: switch_lldp is not none
+
+- name: Set LLDP globally
+  ansible.netcommon.cli_command:
+    command: "{{ item }}"
+  loop:
+    - "configure"
+    - "{{ 'lldp' if switch_lldp else 'no lldp' }}"
+    - "end"
+  when:
+    - switch_lldp is not none
+    - (_switch_running_config.stdout is regex('(?m)^\s*lldp\s*$')) != switch_lldp
   changed_when: true
   notify: write memory
