@@ -57,6 +57,17 @@
     omada_ap_host: dv02wap001p01
     omada_adopt_timeout: 300                  # seconds to wait for the AP to connect
 
+    # Segments in deevnet_vlans to leave out of this run, by key. Normally empty:
+    # inventory declares the wireless segments and this play reconciles all of them.
+    #
+    # It exists because an SSID is created once and never rewritten (see the guards
+    # above), so a segment whose security model is still being decided must not be
+    # created with the wrong one "for now". CHG-0005 holds out `iot` while PPSK is
+    # proven on the AP, and drops the skip once the answer is known either way.
+    #
+    #   -e '{"omada_segment_skip":["iot"]}'
+    omada_segment_skip: []
+
     # The SSID settings CHG-0001's hand-configured SSIDs and the March migration
     # playbook used, kept so the controller-provisioned SSIDs behave the same.
     omada_ssid_base:
@@ -129,7 +140,8 @@
         _ap_if: "{{ hostvars[omada_ap_host].env.interfaces.eth0 }}"
       ansible.builtin.set_fact:
         omada_segments: >-
-          {{ deevnet_vlans | dict2items | selectattr('value.wifi_ssid', 'defined') | list }}
+          {{ deevnet_vlans | dict2items | selectattr('value.wifi_ssid', 'defined')
+             | rejectattr('key', 'in', omada_segment_skip) | list }}
         omada_ap:
           name: "{{ omada_ap_host }}"
           mac: "{{ hostvars[omada_ap_host].infrastructure.interfaces.eth0.mac | upper | replace(':', '-') }}"
@@ -400,7 +412,11 @@
                 headers: "{{ omada_hdr }}"
                 body_format: json
                 body:
-                  mode: Static
+                  # The controller wants a lowercase "static" here, even though the
+                  # published spec's own description reads "Static; DHCP". The running
+                  # controller is ground truth: "Static" is rejected with
+                  # errorCode -1001 (CHG-0005, 2026-09-15). Same for "dhcp".
+                  mode: static
                   staticIpSetting:
                     configIp: "{{ omada_ap.ip }}"
                     configMask: "{{ omada_ap.netmask }}"
