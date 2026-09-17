@@ -140,15 +140,22 @@
     _from_iface: "{{ zone_to_interface[item.from_zone].identifier | default('') }}"
     _from_subnet: "{{ deevnet_vlans[item.from_zone].subnet | default('') }}"
     _to_subnet: "{{ deevnet_vlans[item.to_zone].subnet | default('') }}"
+    # A zone pair is the usual grain, and then every field comes from the zones.
+    # An entry may narrow any of them - one host to one port rather than a whole
+    # segment - and must then carry a `name`, because the description is the key
+    # this role reconciles on and two entries for the same pair would otherwise
+    # be the same rule.
     _policy_rule:
-      description: "{{ firewall_managed_prefix }} {{ item.from_zone }} -> {{ item.to_zone }}"
+      description: >-
+        {{ firewall_managed_prefix }} {{ item.from_zone }} -> {{ item.to_zone }}{{
+          (': ' ~ item.name) if item.name is defined else '' }}
       interface: "{{ _from_iface }}"
       direction: "in"
       action: "{{ item.action | default('pass') }}"
-      protocol: ""
-      source_net: "{{ _from_subnet }}"
-      destination_net: "{{ _to_subnet }}"
-      destination_port: ""
+      protocol: "{{ item.protocol | default('') }}"
+      source_net: "{{ item.source_net | default(_from_subnet, true) }}"
+      destination_net: "{{ item.destination_net | default(_to_subnet, true) }}"
+      destination_port: "{{ item.destination_port | default('') }}"
       sequence: "{{ _seq | int }}"
   loop: "{{ firewall_zone_policies }}"
   loop_control:
