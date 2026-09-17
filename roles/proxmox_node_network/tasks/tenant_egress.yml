@@ -35,6 +35,9 @@
 # defaults it does not care about.
 - name: Resolve optional tenant egress settings
   ansible.builtin.set_fact:
+    # True once the exit node's agent renders the per-tenant routes from the
+    # Deevnet API (ADR-0015 §7), which is what retires the inventory list.
+    _egress_agent_managed: "{{ proxmox_tenant_egress.agent_managed | default(false) | bool }}"
     _egress_forwarding: "{{ proxmox_tenant_egress.forwarding | default(true) | bool }}"
     _egress_sysctl_file: >-
       {{ proxmox_tenant_egress.sysctl_file
@@ -122,6 +125,10 @@
          | reject('in', _node_vrfs.stdout_lines | map('split') | map('first') | list)
          | list }}
 
+# When the exit node's agent owns this file (ADR-0015 §7), the inventory list
+# stops being the source: the agent renders it from the API. The forwarding
+# sysctl and the transit interface above stay here - they are the node's, not a
+# tenant's.
 - name: Install the local FRR configuration
   ansible.builtin.template:
     src: frr.conf.local.j2
@@ -130,6 +137,7 @@
     group: frr
     mode: "0640"
   become: true
+  when: not _egress_agent_managed
   notify: regenerate sdn frr configuration
 
 - name: Regenerate the FRR configuration now if the local config changed

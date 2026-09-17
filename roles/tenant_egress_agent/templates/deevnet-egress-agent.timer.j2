@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Check the Deevnet API for tenant VRFs every {{ tenant_egress_agent_interval }}
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={{ tenant_egress_agent_interval }}
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

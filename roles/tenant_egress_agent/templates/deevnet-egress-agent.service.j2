@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Render tenant VRF default routes from the Deevnet API (ADR-0015 §7)
+After=network-online.target pve-cluster.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile={{ tenant_egress_agent_env }}
+ExecStart={{ tenant_egress_agent_bin }}
+# A failed fetch is normal while the API is down; the timer tries again.
+SuccessExitStatus=0

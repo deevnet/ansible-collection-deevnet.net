@@ -1,0 +1,12 @@
+---
+- name: reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  become: true
+
+- name: restart egress agent timer
+  ansible.builtin.systemd_service:
+    name: "{{ tenant_egress_agent_unit }}.timer"
+    state: restarted
+    enabled: true
+  become: true

@@ -1,0 +1,36 @@
+---
+# The exit node's egress agent (ADR-0015 §7).
+#
+# A tenant VRF needs a default route pointing at the perimeter, and that is FRR
+# configuration on the exit node: node-local state the Proxmox API does not
+# model, so the API cannot write it. Rather than give the API root on a
+# hypervisor, the exit node pulls the tenant list and renders the file itself.
+#
+# It replaces the per-tenant half of proxmox_node_network's tenant_egress
+# tasks, which read the list from inventory. The forwarding sysctl and the
+# transit interface stay there: they are the node's, not a tenant's.
+
+tenant_egress_agent_enabled: true
+
+# Where the list comes from. The token reads GET /v1/fabric/egress and nothing
+# else; it is never an operator token.
+tenant_egress_agent_api_url: ""
+tenant_egress_agent_token: "{{ vault_deevnet_egress_agent_token | default('') }}"
+# The site CA that signed the API's certificate, copied here by this role.
+tenant_egress_agent_ca_src: ""
+tenant_egress_agent_ca_dest: /etc/deevnet/site-ca.pem
+
+tenant_egress_agent_bin: /usr/local/sbin/deevnet-egress-agent
+tenant_egress_agent_env: /etc/deevnet/egress-agent.env
+tenant_egress_agent_unit: deevnet-egress-agent
+# How often the exit node checks. A tenant's egress is in place within this
+# long of its network being built; nothing else waits on it.
+tenant_egress_agent_interval: 5min
+
+# What the agent writes, and how it takes effect. frr.conf.local is an input to
+# Proxmox's generator: it only reaches FRR when PVE rewrites frr.conf.
+tenant_egress_agent_frr_local: /etc/frr/frr.conf.local
+tenant_egress_agent_gateway: "{{ deevnet_vlans.tenant_transit.gateway | default('') }}"
+
+# Where the agent's readback looks for the routes it rendered.
+tenant_egress_agent_vrf_prefix: vrf_

@@ -1,0 +1,7 @@
+---
+galaxy_info:
+  role_name: tenant_egress_agent
+  description: Renders each tenant VRF's default route on the exit node from the Deevnet API (ADR-0015 §7)
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []
