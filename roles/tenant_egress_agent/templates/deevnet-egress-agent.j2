@@ -1,0 +1,63 @@
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Renders a default route inside every tenant VRF, from the list the Deevnet
+# API publishes (ADR-0015 §7). Run by {{ tenant_egress_agent_unit }}.timer.
+#
+# Why the route exists at all: Proxmox deletes the VRF's unreachable default on
+# an exit node, so a lookup that misses falls through to the MAIN table and
+# leaves on-link, unSNATed, without touching the perimeter. An explicit default
+# inside the VRF is what keeps ADR-0001's seam literal.
+set -euo pipefail
+
+: "${DEEVNET_API_URL:?}"
+: "${DEEVNET_AGENT_TOKEN:?}"
+GATEWAY="${DEEVNET_TRANSIT_GATEWAY:?}"
+CA="${DEEVNET_API_CACERT:-}"
+TARGET="${DEEVNET_FRR_LOCAL:-/etc/frr/frr.conf.local}"
+
+curl_args=(--silent --show-error --fail --max-time 20
+  --header "Authorization: Bearer ${DEEVNET_AGENT_TOKEN}")
+[[ -n "$CA" ]] && curl_args+=(--cacert "$CA")
+
+# A failed fetch changes nothing: the file on disk keeps the last list the API
+# was known to hold, so an API outage never withdraws a tenant's egress.
+if ! response=$(curl "${curl_args[@]}" "${DEEVNET_API_URL}/v1/fabric/egress"); then
+  echo "egress-agent: cannot reach ${DEEVNET_API_URL}; leaving ${TARGET} as it is" >&2
+  exit 1
+fi
+
+# The JSON arrives on stdin, so the program comes from -c: a heredoc would be
+# stdin too, and the two would collide.
+render='
+import json, sys
+gateway = sys.argv[1]
+vrfs = sorted({v["vrf"] for v in json.load(sys.stdin)["vrfs"]})
+print("""! Managed by deevnet-egress-agent (ADR-0015 section 7). Do not edit.
+!
+! A default route inside each tenant VRF, pointing at the perimeter over the
+! transit segment. Proxmox merges this file into the configuration it generates
+! (PVE/Network/SDN/Frr.pm), folding a bare `vrf <name>` stanza into its own
+! block, so these lines land inside `vrf vrf_<tenant>` on every SDN apply.""")
+for vrf in vrfs:
+    print("\nvrf %s\n ip route 0.0.0.0/0 %s nexthop-vrf default\nexit-vrf" % (vrf, gateway))
+'
+if ! rendered=$(printf '%s' "$response" | python3 -c "$render" "$GATEWAY"); then
+  echo "egress-agent: the API answered something this agent cannot read; leaving ${TARGET} as it is" >&2
+  exit 1
+fi
+
+if [[ -f "$TARGET" ]] && [[ "$(cat "$TARGET")" == "$rendered" ]]; then
+  exit 0
+fi
+
+umask 027
+printf '%s\n' "$rendered" > "${TARGET}.new"
+chown root:frr "${TARGET}.new" 2>/dev/null || true
+chmod 0640 "${TARGET}.new"
+mv "${TARGET}.new" "$TARGET"
+echo "egress-agent: rewrote ${TARGET}"
+
+# frr.conf.local only reaches FRR when PVE regenerates frr.conf.
+pvesh set /cluster/sdn
+systemctl reload frr

@@ -1,0 +1,22 @@
+# Install the exit node's egress agent (ADR-0015 §7)
+#
+# A tenant VRF's default route is FRR configuration on the exit node, which the
+# Proxmox API does not model. Rather than give the Deevnet API root on a
+# hypervisor, the exit node pulls the tenant list from the API and renders the
+# file itself, every few minutes and once on boot.
+#
+#   ansible-playbook playbooks/tenant-egress-agent.yml
+#   ansible-playbook playbooks/tenant-egress-agent.yml -e target=dv02hyp002p02
+#
+# It needs, in inventory: the API's address, the site CA fetched by the
+# deevnet.mgmt openbao role, and vault_deevnet_egress_agent_token - the API's
+# DEEVNET_AGENT_TOKEN, which reads the VRF list and nothing else.
+#
+# Once it runs, set proxmox_tenant_egress.agent_managed: true so
+# proxmox_node_network stops writing the same file from the inventory list.
+
+- name: Install the tenant egress agent
+  hosts: "{{ target | default('tenant_hypervisors') }}"
+  gather_facts: false
+  roles:
+    - tenant_egress_agent

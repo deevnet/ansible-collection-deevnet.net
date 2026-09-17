@@ -1,0 +1,113 @@
+---
+- name: Fail early without the API and its token
+  ansible.builtin.assert:
+    that:
+      - tenant_egress_agent_api_url | length > 0
+      - tenant_egress_agent_token | length > 0
+      - tenant_egress_agent_gateway | length > 0
+    fail_msg: >-
+      The egress agent needs tenant_egress_agent_api_url, a token
+      (vault_deevnet_egress_agent_token - the API's DEEVNET_AGENT_TOKEN, which
+      reads the VRF list and nothing else) and the transit gateway. Without them
+      tenant VRFs would keep whatever default route they have.
+  no_log: true
+
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: "{{ tenant_egress_agent_env | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+
+- name: Place the site CA
+  ansible.builtin.copy:
+    src: "{{ tenant_egress_agent_ca_src }}"
+    dest: "{{ tenant_egress_agent_ca_dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: tenant_egress_agent_ca_src | length > 0
+  become: true
+
+- name: Write the agent's environment
+  ansible.builtin.template:
+    src: egress-agent.env.j2
+    dest: "{{ tenant_egress_agent_env }}"
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  diff: false
+  notify: restart egress agent timer
+
+- name: Install the agent
+  ansible.builtin.template:
+    src: deevnet-egress-agent.j2
+    dest: "{{ tenant_egress_agent_bin }}"
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+  notify: restart egress agent timer
+
+- name: Install the service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - "{{ tenant_egress_agent_unit }}.service"
+    - "{{ tenant_egress_agent_unit }}.timer"
+  become: true
+  notify:
+    - reload systemd
+    - restart egress agent timer
+
+- name: Apply pending unit changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the timer
+  ansible.builtin.systemd_service:
+    name: "{{ tenant_egress_agent_unit }}.timer"
+    enabled: "{{ tenant_egress_agent_enabled | bool }}"
+    state: "{{ 'started' if tenant_egress_agent_enabled | bool else 'stopped' }}"
+  become: true
+
+# Run it once here rather than waiting for the timer, so an apply that adds the
+# agent leaves the node already in the state the agent maintains.
+- name: Run the agent now
+  ansible.builtin.command: "systemctl start {{ tenant_egress_agent_unit }}.service"
+  when: tenant_egress_agent_enabled | bool
+  changed_when: true
+  become: true
+
+- name: Read back what the agent rendered
+  ansible.builtin.slurp:
+    src: "{{ tenant_egress_agent_frr_local }}"
+  register: tenant_egress_agent_rendered
+  failed_when: false
+  become: true
+
+# Asserting the outcome rather than the write: what matters is that every VRF
+# the API lists has a default route through the perimeter.
+- name: Read each tenant VRF's default route
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for vrf in $(ip -json vrf show | python3 -c "import json,sys; print(' '.join(v['name'] for v in json.load(sys.stdin) if v['name'].startswith('vrf_')))"); do
+        printf '%s %s\n' "$vrf" "$(ip route show vrf "$vrf" default | head -1)"
+      done
+    executable: /bin/bash
+  register: tenant_egress_agent_routes
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Report tenant egress
+  ansible.builtin.debug:
+    msg: >-
+      {{ tenant_egress_agent_routes.stdout_lines | default([]) }}
