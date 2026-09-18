@@ -1,0 +1,114 @@
+---
+# Ensure declared static routes via /api/routes/routes/
+#
+# A route is identified by its network, since one destination should have one
+# route. Changing the gateway for a network is an update, not a second route.
+
+- name: Get current static routes
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/routes/routes/searchroute"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: routes_existing
+  delegate_to: localhost
+
+- name: Build network to record mapping
+  ansible.builtin.set_fact:
+    routes_by_network: >-
+      {{
+        routes_by_network | default({}) | combine({
+          (item.network | string): item
+        })
+      }}
+  loop: "{{ routes_existing.json.rows | default([]) }}"
+  loop_control:
+    label: "{{ item.network | default('?') }}"
+  when: item.network is defined
+
+- name: Ensure routes_by_network is defined
+  ansible.builtin.set_fact:
+    routes_by_network: {}
+  when: routes_by_network is not defined
+
+- name: Report existing routes
+  ansible.builtin.debug:
+    msg: >-
+      {{ routes_by_network | length }} static route(s) on the router:
+      {{ routes_by_network.keys() | list }}
+
+- name: Create missing routes
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/routes/routes/addroute"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      route:
+        network: "{{ item.network }}"
+        gateway: "{{ item.gateway }}"
+        descr: "{{ item.description | default('') }}"
+        disabled: "0"
+    return_content: true
+  register: routes_add
+  failed_when: >-
+    routes_add.status != 200
+    or (routes_add.json.result | default('')) != 'saved'
+  changed_when: true
+  notify: reconfigure routes
+  loop: "{{ opnsense_static_routes }}"
+  loop_control:
+    label: "{{ item.network }} via {{ item.gateway }}"
+  when: item.network not in routes_by_network
+  delegate_to: localhost
+
+- name: Update routes whose gateway or description differs
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/routes/routes/setroute/{{ routes_by_network[item.network].uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      route:
+        network: "{{ item.network }}"
+        gateway: "{{ item.gateway }}"
+        descr: "{{ item.description | default('') }}"
+        disabled: "0"
+    return_content: true
+  register: routes_set
+  failed_when: >-
+    routes_set.status != 200
+    or (routes_set.json.result | default('')) != 'saved'
+  changed_when: true
+  notify: reconfigure routes
+  loop: "{{ opnsense_static_routes }}"
+  loop_control:
+    label: "{{ item.network }}"
+  when:
+    - item.network in routes_by_network
+    - >-
+      (routes_by_network[item.network].gateway | default('') | regex_replace('\s*-.*$', '') | trim) != item.gateway
+      or (routes_by_network[item.network].descr | default('')) != (item.description | default(''))
+      or (routes_by_network[item.network].disabled | default(false) | bool)
+  delegate_to: localhost
+
+- name: Report routes the router holds that inventory does not declare
+  ansible.builtin.debug:
+    msg: >-
+      Undeclared static routes, left alone: {{ routes_undeclared }}.
+      This role does not delete; remove one at the router if it is unwanted.
+  vars:
+    routes_undeclared: >-
+      {{ routes_by_network.keys() | difference(opnsense_static_routes | map(attribute='network') | list) | list }}
+  when: routes_undeclared | length > 0

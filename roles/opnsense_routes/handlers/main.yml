@@ -1,0 +1,29 @@
+---
+# Apply routing changes on OPNsense.
+#
+# Gateways first: a route referencing a gateway that has not been applied yet
+# is a route to nowhere.
+
+- name: reconfigure gateways
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/routing/settings/reconfigure"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+  delegate_to: localhost
+
+- name: reconfigure routes
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/routes/routes/reconfigure"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+  delegate_to: localhost

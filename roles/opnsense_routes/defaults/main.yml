@@ -1,0 +1,43 @@
+---
+# opnsense_routes role defaults
+#
+# Manages OPNsense gateways and static routes from inventory, so that a route
+# the substrate depends on survives a router rebuild instead of living only in
+# someone's memory of a GUI form.
+
+# OPNsense API settings (typically inherited from group_vars/routers.yml)
+opnsense_api_url: "https://{{ ansible_host }}/api"
+opnsense_validate_certs: false
+
+# Gateways to ensure. A static route cannot name a bare address in OPNsense; it
+# references a gateway object, so any route to an internal next hop needs one.
+#
+#   - name: TENANT_FABRIC_GW        # OPNsense gateway name, [A-Za-z0-9_]
+#     zone: tenant_transit          # key in deevnet_vlans; resolved to opt<N>
+#     address: 10.20.50.22          # the next hop, which must sit in that zone
+#     description: "..."            # free text
+#
+# Deliberately NOT exposed: defaultgw. This role never creates a default
+# gateway - that is the WAN's job, and a second one appearing by accident is
+# how a router stops routing.
+opnsense_gateways: []
+
+# Monitoring is off unless a gateway asks for it. The existing WAN_GW runs with
+# monitor_disable=1, and an internal next hop that dpinger decides is "down"
+# would have its routes pulled out from under it for no benefit.
+opnsense_gateway_monitor_disable: "1"
+
+# Static routes to ensure.
+#
+#   - network: 10.20.128.0/18
+#     gateway: TENANT_FABRIC_GW     # must be a gateway name, managed or not
+#     description: "..."
+opnsense_static_routes: []
+
+# This role does not delete. It ensures what inventory declares and reports
+# anything else it finds, by name, so drift is visible without being acted on.
+#
+# That is deliberate: the routing table is the one thing that, removed by
+# surprise, takes the site off the network, and unlike the firewall there is no
+# savepoint to roll it back. Removing a gateway or route is a decision someone
+# makes at the router, having read the report.
