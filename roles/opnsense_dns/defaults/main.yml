@@ -48,20 +48,10 @@ dns_register_dhcp_leases: false
 # `deevnet.net` instead of on top of the real records.
 dns_dhcp_registration_domain: "{{ dns_domain }}"
 
-# Tenant zone delegation (ADR-0004)
-# ------------------------------------------------------------------------------
-# Tenant records are NOT held here. Unbound forwards each tenant zone to the
-# authoritative server that does hold them, so a substrate reconciliation - this
-# role, including dns_delete_unmanaged - cannot reach tenant content.
-dns_tenant_delegation_enabled: true
-
-# Where the tenant zones are served. Resolved from the tenant_dns group rather
-# than written as a literal: ADR-0004 expects the service to move hosts
-# eventually, and consumers should follow it without an edit here.
-dns_tenant_server: >-
-  {{ hostvars[groups['tenant_dns'] | first].env.interfaces.eth0.ip
-     if (groups['tenant_dns'] | default([]) | length > 0)
-     else '' }}
+# Tenant zone delegation is the Deevnet API's (ADR-0015 §6), not this role's:
+# it knows a tenant's index, and therefore which reverse zone to delegate. The
+# endpoint notes below are kept because they were expensive to establish and the
+# API's OPNsense backend speaks to the same endpoints.
 
 # Unbound query-forwarding endpoints, verified against OPNsense 25.7.10.
 #
