@@ -17,14 +17,12 @@
 - name: Configure Unbound host overrides
   ansible.builtin.include_tasks: configure_unbound.yml
 
-# import_tasks, not include_tasks: tags on a DYNAMIC include apply to the
-# include statement alone, so `--tags tenant-dns` ran this include and then
-# filtered out every task inside it - the documented way to run this step did
-# nothing at all, silently, and the assert below it never got the chance to
-# fire. A static import propagates the tag to the tasks it pulls in.
-- name: Delegate tenant zones to the tenant DNS server
-  ansible.builtin.import_tasks: configure_domain_overrides.yml
-  when:
-    - dns_tenant_delegation_enabled | bool
-    - groups['tenant_dns'] | default([]) | length > 0
-  tags: [tenant-dns]
+# Tenant zone delegation is NOT here any more. The Deevnet API adds the Unbound
+# query-forwarding entry for a tenant's forward and reverse zones when it admits
+# the tenant (ADR-0015 §6), because it is the thing that knows the tenant's index
+# and therefore which reverse zone to delegate. Doing it from inventory as well
+# meant one object with two sources and two registries that drift - retired in
+# CHG-0010 step 11.
+#
+# Nothing here prunes forward entries, so the API's survive this role untouched;
+# dns_delete_unmanaged reaches host overrides and aliases only.

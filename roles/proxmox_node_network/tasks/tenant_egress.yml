@@ -54,6 +54,10 @@
       tenant egress leaves by.
     success_msg: "Tenant egress leaves via {{ _transit_interface }} to {{ _transit_gateway }}."
 
+# Only meaningful while this role still writes the per-tenant file. Once the
+# agent owns it the list is the API's, and inventory is expected to be empty -
+# asserting on it then would fail on every run for a host that is working
+# correctly.
 - name: Assert tenants are declared
   ansible.builtin.assert:
     that:
@@ -62,7 +66,9 @@
       proxmox_tenant_egress.enabled is true but no tenants are listed. Set
       proxmox_tenant_egress.tenants in host_vars/{{ inventory_hostname }}/ to
       the tenant names the fabric carries - the zone ID, which is also the VRF
-      suffix (zone 'tdemo' -> vrf_tdemo).
+      suffix (zone 'tdemo' -> vrf_tdemo). Or set agent_managed, and the Deevnet
+      API's list is used instead.
+  when: not _egress_agent_managed
 
 # --- Forwarding -------------------------------------------------------------
 
@@ -108,19 +114,22 @@
   changed_when: false
   become: true
 
+# Drift between the inventory list and the node only exists while inventory
+# holds a list. Under the agent there is nothing to drift from.
 - name: Assert every declared tenant has a VRF on the node
   ansible.builtin.assert:
     that:
       - _missing_vrfs | length == 0
     fail_msg: >-
       Declared in inventory but not present on {{ proxmox_node }}:
-      {{ _missing_vrfs | join(', ') }}. The tenant factory creates the VRF, so
-      either `terraform apply` has not run for these tenants or the names in
+      {{ _missing_vrfs | join(', ') }}. The tenant's zone creates the VRF, so
+      either the tenant has not been applied or the names in
       proxmox_tenant_egress.tenants do not match their zone IDs.
-    success_msg: "All declared tenant VRFs exist: {{ proxmox_tenant_egress.tenants | join(', ') }}."
+    success_msg: "All declared tenant VRFs exist: {{ proxmox_tenant_egress.tenants | default([]) | join(', ') }}."
+  when: not _egress_agent_managed
   vars:
     _missing_vrfs: >-
-      {{ proxmox_tenant_egress.tenants
+      {{ proxmox_tenant_egress.tenants | default([])
          | map('regex_replace', '^', 'vrf_')
          | reject('in', _node_vrfs.stdout_lines | map('split') | map('first') | list)
          | list }}
@@ -148,9 +157,20 @@
 # Asserting the outcome rather than the write: the whole point of this file is
 # a routing result, and a template that rendered is not evidence of one.
 
+# Whose list to verify: inventory's while this role writes the file, and the
+# node's own VRFs once the agent does - which is also a better check, because it
+# verifies what is really there rather than what was declared.
+- name: Decide which tenant VRFs to verify
+  ansible.builtin.set_fact:
+    _verify_tenants: >-
+      {{ (_node_vrfs.stdout_lines | map('split') | map('first')
+          | select('match', '^vrf_') | map('regex_replace', '^vrf_', '') | list)
+         if _egress_agent_managed
+         else proxmox_tenant_egress.tenants }}
+
 - name: Read each tenant VRF's routing table
   ansible.builtin.command: "ip route show vrf vrf_{{ item }}"
-  loop: "{{ proxmox_tenant_egress.tenants }}"
+  loop: "{{ _verify_tenants }}"
   register: _vrf_routes
   changed_when: false
   become: true
@@ -177,7 +197,7 @@
 # the management bridge and the perimeter never sees the traffic.
 - name: Check where management-bound tenant traffic would go
   ansible.builtin.command: "ip route get {{ _mgmt_probe }} vrf vrf_{{ item }}"
-  loop: "{{ proxmox_tenant_egress.tenants }}"
+  loop: "{{ _verify_tenants }}"
   register: _mgmt_lookup
   changed_when: false
   become: true
