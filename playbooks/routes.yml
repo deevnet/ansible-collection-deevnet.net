@@ -1,0 +1,22 @@
+---
+# Configure OPNsense gateways and static routes
+#
+# Ensures what inventory declares in opnsense_gateways and
+# opnsense_static_routes. It does not delete; anything else on the router is
+# reported by name and left alone.
+#
+# The route this exists for is the tenant overlay (ADR-0018, CHG-0012): the
+# core router carries one aggregate route to 10.20.128.0/18 via the fabric exit
+# node, so the substrate's operator networks can reach tenant workloads.
+#
+# Usage:
+#   ansible-playbook playbooks/routes.yml
+#
+# Verify from the network, not from Ansible:
+#   ssh a_autoprov@<a tenant workload address>
+
+- name: Configure OPNsense gateways and static routes
+  hosts: dns_servers
+  gather_facts: false
+  roles:
+    - opnsense_routes

@@ -6,6 +6,7 @@
 #   2. Zone-based firewall rules
 #   3. DNS (Unbound)
 #   4. DHCP (Kea)
+#   5. Gateways and static routes
 #
 # Secrets are vaulted in inventory (group_vars/routers/vault.yml).
 # Usage:
@@ -19,3 +20,4 @@
     - opnsense_firewall
     - opnsense_dns
     - opnsense_dhcp
+    - opnsense_routes

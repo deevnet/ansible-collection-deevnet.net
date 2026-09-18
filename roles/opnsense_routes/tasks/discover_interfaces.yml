@@ -1,0 +1,117 @@
+---
+# Resolve zone name -> OPNsense interface identifier (opt<N>, lan, wan).
+#
+# Same two-step as opnsense_firewall: a zone's VLAN tag gives a device name,
+# and the device name gives the identifier. Matching on the interface's
+# description would be one call shorter and would break the day someone renames
+# one in the GUI.
+#
+# Output fact: routes_zone_to_interface
+#   { "tenant_transit": "opt10", ... }
+
+- name: Get VLAN configuration
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/vlan_settings/searchItem"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: routes_vlans
+  delegate_to: localhost
+
+- name: Build VLAN tag to device mapping
+  ansible.builtin.set_fact:
+    routes_devices_by_tag: >-
+      {{
+        routes_devices_by_tag | default({}) | combine({
+          (item.tag | string): item.vlanif | default('')
+            | regex_replace('\s*\[.*$', '')
+        })
+      }}
+  loop: "{{ routes_vlans.json.rows | default([]) }}"
+  loop_control:
+    label: "VLAN {{ item.tag | default('?') }} -> {{ item.vlanif | default('?') }}"
+  when:
+    - item.tag is defined
+    - item.vlanif is defined
+
+- name: Ensure routes_devices_by_tag is defined
+  ansible.builtin.set_fact:
+    routes_devices_by_tag: {}
+  when: routes_devices_by_tag is not defined
+
+- name: Get interface assignments
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/interfaces/overview/export"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: routes_ifaces
+  delegate_to: localhost
+
+# This endpoint answers with JSON but labels it "text/html; charset=UTF-8", so
+# the uri module never populates .json. opnsense_firewall hit this first, where
+# it failed silently and reported a converged run that had applied nothing; here
+# the assert below catches it, but parsing the body explicitly is the fix.
+- name: Parse the interface assignments
+  ansible.builtin.set_fact:
+    routes_iface_list: "{{ routes_ifaces.content | from_json }}"
+
+- name: Build device to identifier mapping
+  ansible.builtin.set_fact:
+    routes_identifier_by_device: >-
+      {{
+        routes_identifier_by_device | default({}) | combine({
+          (item.device | string): item.identifier
+        })
+      }}
+  loop: "{{ routes_iface_list | default([]) }}"
+  loop_control:
+    label: "{{ item.device | default('?') }} -> {{ item.identifier | default('?') }}"
+  when:
+    - item.device is defined
+    - item.identifier is defined
+    - item.identifier | length > 0
+
+- name: Ensure routes_identifier_by_device is defined
+  ansible.builtin.set_fact:
+    routes_identifier_by_device: {}
+  when: routes_identifier_by_device is not defined
+
+- name: Map each declared gateway's zone to an interface identifier
+  ansible.builtin.set_fact:
+    routes_zone_to_interface: >-
+      {{
+        routes_zone_to_interface | default({}) | combine({
+          item.zone: routes_identifier_by_device[
+            routes_devices_by_tag[deevnet_vlans[item.zone].vlan_id | string] | default('')
+          ] | default('')
+        })
+      }}
+  loop: "{{ opnsense_gateways }}"
+  loop_control:
+    label: "{{ item.zone }}"
+
+- name: Fail if a zone did not resolve to an interface
+  ansible.builtin.assert:
+    that:
+      - routes_zone_to_interface[item.zone] | length > 0
+    fail_msg: >-
+      Zone {{ item.zone }} (VLAN {{ deevnet_vlans[item.zone].vlan_id | default('?') }})
+      has no interface on this router. The VLAN must exist and be assigned
+      before a gateway can sit on it - run opnsense_vlans first.
+    quiet: true
+  loop: "{{ opnsense_gateways }}"
+  loop_control:
+    label: "{{ item.zone }} -> {{ routes_zone_to_interface[item.zone] | default('') }}"
+
+- name: Display resolved interfaces
+  ansible.builtin.debug:
+    msg: "{{ routes_zone_to_interface }}"
