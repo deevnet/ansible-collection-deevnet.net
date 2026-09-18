@@ -6,9 +6,14 @@
 #   networks  one LAN network per deevnet_vlans segment that has a wifi_ssid,
 #             matched on VLAN id - so the networks created by hand-era tooling
 #             are recognised, whatever they are called
+#   profiles  one PPSK profile per segment that declares wifi_security: ppsk,
+#             matched on name. The profile is created EMPTY - the keys inside it
+#             are tenant content written by the Deevnet API, not by inventory
+#             (ADR-0012 section 6). This play never reads or prints them.
 #   SSIDs     one per segment with a wifi_ssid, in the site's primary WLAN group,
-#             matched on name, keyed from deevnet_wifi_psk[<segment>], tagged to
-#             the segment's network
+#             matched on name, tagged to the segment's network. A shared-key
+#             segment is keyed from deevnet_wifi_psk[<segment>]; a ppsk segment
+#             is security 4, bound to its profile, and has no shared key.
 #   the AP    once adopted: its name and static address, from
 #             host_vars/<omada_ap_host>. An adopted AP joins the site's primary
 #             WLAN group, which is where the SSIDs above are created.
@@ -27,7 +32,8 @@
 #                    for it to connect.
 #
 # Guards, after INC-0001:
-#   - an empty desired set is refused, and so is a wireless segment with no key;
+#   - an empty desired set is refused; a shared-key segment with no key is
+#     refused, and so is a ppsk segment that still has one;
 #   - nothing is ever deleted - objects inventory does not declare are reported
 #     and left in place, and existing objects that differ are reported, not
 #     rewritten;
@@ -62,8 +68,8 @@
     #
     # It exists because an SSID is created once and never rewritten (see the guards
     # above), so a segment whose security model is still being decided must not be
-    # created with the wrong one "for now". CHG-0005 holds out `iot` while PPSK is
-    # proven on the AP, and drops the skip once the answer is known either way.
+    # created with the wrong one "for now". CHG-0005 held out `iot` while PPSK was
+    # proven on the AP; CHG-0013 settled the model and dropped the skip.
     #
     #   -e '{"omada_segment_skip":["iot"]}'
     omada_segment_skip: []
@@ -85,6 +91,9 @@
       - {method: get, path: "/openapi/v1/{omadacId}/sites"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks"}
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/lan-networks"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/ppsk-profiles"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/ppsk-profile"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/ppsk-profile/{profileId}/delete-psk"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids"}
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids"}
@@ -150,25 +159,50 @@
           netmask: "255.255.255.0"
           dns: "{{ _ap_if.gateway | default(deevnet_vlans[_ap_if.segment].gateway) }}"
 
-    - name: Refuse an empty desired set, or a wireless segment without a key
+    - name: Split the wireless segments by security model
+      # A segment declares wifi_security: ppsk to be keyed per tenant by the
+      # Deevnet API (ADR-0012 section 6). Anything else, including the far more
+      # common case of saying nothing at all, is a shared key from the vault.
+      ansible.builtin.set_fact:
+        omada_segments_psk: >-
+          {{ omada_segments | rejectattr('value.wifi_security', 'defined') | list
+             + omada_segments | selectattr('value.wifi_security', 'defined')
+               | selectattr('value.wifi_security', 'equalto', 'psk') | list }}
+        omada_segments_ppsk: >-
+          {{ omada_segments | selectattr('value.wifi_security', 'defined')
+             | selectattr('value.wifi_security', 'equalto', 'ppsk') | list }}
+
+    - name: Refuse an empty desired set, or a segment whose keying is wrong
       ansible.builtin.assert:
         that:
           - omada_segments | length > 0
-          - omada_segments | map(attribute='key') | reject('in', deevnet_wifi_psk.keys() | list) | list | length == 0
+          # Every segment must land in exactly one bucket. Without this, a typo
+          # such as `wifi_security: ppks` drops the segment from both and the
+          # play converges on silently doing nothing - the INC-0001 failure.
+          - (omada_segments_psk | length) + (omada_segments_ppsk | length) == omada_segments | length
+          - omada_segments_psk | map(attribute='key') | reject('in', deevnet_wifi_psk.keys() | list) | list | length == 0
+          # A ppsk segment must NOT carry a shared key: the keys in its profile
+          # belong to tenants, and a leftover vault key would be handed to the
+          # controller as if it were one.
+          - omada_segments_ppsk | map(attribute='key') | select('in', deevnet_wifi_psk.keys() | list) | list | length == 0
+          - omada_segments_ppsk | rejectattr('value.wifi_ppsk_profile', 'defined') | list | length == 0
         fail_msg: >-
-          Refusing to reconcile: no segment in deevnet_vlans declares a wifi_ssid, or
-          {{ omada_segments | map(attribute='key') | reject('in', deevnet_wifi_psk.keys() | list) | list }}
-          has no key in deevnet_wifi_psk. An empty or partial desired set is a failure, not a
-          converged state (INC-0001).
+          Refusing to reconcile. Either no segment in deevnet_vlans declares a wifi_ssid; or a
+          segment's wifi_security is neither 'psk' nor 'ppsk'; or
+          {{ omada_segments_psk | map(attribute='key') | reject('in', deevnet_wifi_psk.keys() | list) | list }}
+          has no key in deevnet_wifi_psk; or
+          {{ omada_segments_ppsk | map(attribute='key') | select('in', deevnet_wifi_psk.keys() | list) | list }}
+          is ppsk but still has one; or a ppsk segment names no wifi_ppsk_profile. An empty or
+          partial desired set is a failure, not a converged state (INC-0001).
         quiet: true
 
-    - name: Refuse a key the controller would reject (8-63 characters)
+    - name: Refuse a shared key the controller would reject (8-63 characters)
       ansible.builtin.assert:
         that:
           - deevnet_wifi_psk[item.key] | length >= 8
           - deevnet_wifi_psk[item.key] | length <= 63
         quiet: true
-      loop: "{{ omada_segments }}"
+      loop: "{{ omada_segments_psk }}"
       no_log: true
 
     - name: Show the desired state
@@ -177,6 +211,7 @@
           controller: "{{ omada_info.json.result.controllerVer }}"
           mode: "{{ ('apply' ~ (' + adopt' if omada_adopt | bool else '')) if omada_apply | bool else 'plan (no writes)' }}"
           ssids: "{{ omada_segments | map(attribute='value.wifi_ssid') | zip(omada_segments | map(attribute='value.vlan_id')) | map('join', ' -> VLAN ') | list }}"
+          ppsk_ssids: "{{ omada_segments_ppsk | map(attribute='value.wifi_ssid') | list }}"
           ap: "{{ omada_ap }}"
 
     # --- Current state (needs the Open API client) --------------------------------
@@ -261,6 +296,21 @@
       register: omada_ssids_read
       failed_when: omada_ssids_read.json.errorCode != 0
 
+    - name: Read the PPSK profiles
+      # omada-api: documented getPPSKProfiles spec 6.3.0.45
+      # Read unconditionally, even at a site with no ppsk segment, so the report
+      # can still name a profile the controller holds that inventory does not.
+      # This is the BRIEF list - id, profileName and the SSIDs bound to it. The
+      # keys inside a profile are deliberately never fetched: getPPSKProfileDetail
+      # returns them with their passwords in plaintext, and those are live tenant
+      # credentials that have no business in Ansible memory or output (ADR-0012).
+      ansible.builtin.uri:
+        url: "{{ omada_site }}/ppsk-profiles"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: omada_ppsk_read
+      failed_when: omada_ppsk_read.json.errorCode != 0
+
     - name: Compare the controller with inventory
       vars:
         _declared_vlans: "{{ omada_segments | map(attribute='value.vlan_id') | map('int') | list }}"
@@ -272,22 +322,47 @@
         omada_ssids_missing: "{{ omada_segments | rejectattr('value.wifi_ssid', 'in', _have_ssids | map(attribute='name') | list) | list }}"
         omada_ssids_undeclared: "{{ _have_ssids | rejectattr('name', 'in', _declared_names) | map(attribute='name') | list }}"
         omada_ap_device: "{{ omada_devices | selectattr('mac', 'equalto', omada_ap.mac) | first | default({}) }}"
+        # getPPSKProfiles returns its result as a bare array, not the
+        # {result: {data: [...]}} grid the network and SSID reads use.
+        omada_ppsk_profiles_missing: >-
+          {{ omada_segments_ppsk | rejectattr('value.wifi_ppsk_profile', 'in',
+               omada_ppsk_read.json.result | default([]) | map(attribute='profileName') | list) | list }}
+        omada_ppsk_profiles_undeclared: >-
+          {{ omada_ppsk_read.json.result | default([])
+             | rejectattr('profileName', 'in', omada_segments_ppsk | map(attribute='value.wifi_ppsk_profile') | list)
+             | map(attribute='profileName') | list }}
 
-    - name: Find declared SSIDs whose VLAN differs from inventory
+    - name: Find declared SSIDs whose VLAN or security model differs from inventory
+      # The security comparison matters as much as the VLAN one: this play never
+      # rewrites an existing SSID, so a DVNTM-IOT created as a shared key at some
+      # point would otherwise stay wrong forever without anything saying so.
+      # getSsidList returns `security`, so this costs no extra request.
       vars:
         _declared: "{{ omada_segments | map(attribute='value') | items2dict(key_name='wifi_ssid', value_name='vlan_id') }}"
+        _declared_sec: >-
+          {{ dict(omada_segments | map(attribute='value.wifi_ssid') | list
+                  | zip(omada_segments | map(attribute='value.wifi_security') | map('default', 'psk') | list)) }}
+        _sec_wanted: "{{ 4 if _declared_sec[item.name] == 'ppsk' else 3 }}"
       ansible.builtin.set_fact:
-        omada_ssids_differ: "{{ omada_ssids_differ | default([]) + [item.name ~ ' is VLAN ' ~ (item.vlanId | default('none')) ~ ', inventory says ' ~ _declared[item.name]] }}"
+        omada_ssids_differ: >-
+          {{ omada_ssids_differ | default([])
+             + [item.name ~ ' is VLAN ' ~ (item.vlanId | default('none')) ~ '/security ' ~ (item.security | default('none'))
+                ~ ', inventory says VLAN ' ~ _declared[item.name] ~ '/security ' ~ _sec_wanted] }}
       loop: "{{ omada_ssids_read.json.result.data | selectattr('name', 'in', _declared.keys() | list) | list }}"
       loop_control:
         label: "{{ item.name }}"
-      when: (item.vlanId | default(0) | int) != (_declared[item.name] | int)
+      when: >-
+        (item.vlanId | default(0) | int) != (_declared[item.name] | int)
+        or (item.security | default(0) | int) != (_sec_wanted | int)
 
     - name: Report
       ansible.builtin.debug:
         msg:
           wlan_group: "{{ omada_wlan.name }}"
           networks_to_create: "{{ omada_networks_missing | map(attribute='value.vlan_id') | list }}"
+          ppsk_profiles_to_create: "{{ omada_ppsk_profiles_missing | map(attribute='value.wifi_ppsk_profile') | list }}"
+          ppsk_profiles_not_in_inventory_left_in_place: "{{ omada_ppsk_profiles_undeclared }}"
+          ppsk_keys_are_api_owned_and_not_inspected: "{{ omada_segments_ppsk | map(attribute='value.wifi_ppsk_profile') | list }}"
           ssids_to_create: "{{ omada_ssids_missing | map(attribute='value.wifi_ssid') | list }}"
           ssids_that_differ_left_alone: "{{ omada_ssids_differ | default([]) }}"
           ssids_not_in_inventory_left_in_place: "{{ omada_ssids_undeclared }}"
@@ -301,6 +376,13 @@
     - name: Apply
       when: omada_apply | bool
       block:
+        # A ppsk segment gets a LAN network like any other. The SSID still
+        # carries vlanId/vlanSetting, which is what a client joining with a key
+        # that has no VLAN binding would land on, and VLAN 30 is the right
+        # default for DVNTM-IOT. A PER-KEY VLAN needs no network object at all -
+        # it is raw 802.1Q tagging and OPNsense serves the DHCP (CHG-0005). That
+        # only starts to matter when one profile carries keys for more than one
+        # VLAN, which DVNTM-IOT does not.
         - name: Create the missing networks
           # omada-api: documented createLanNetwork spec 6.3.0.45
           ansible.builtin.uri:
@@ -325,25 +407,151 @@
           register: omada_networks_now
           failed_when: omada_networks_now.json.errorCode != 0
 
+        # --- PPSK profiles, before the SSIDs that bind them -------------------
+        #
+        # A security-4 SSID carries ppskSetting.ppskProfileId, so the profile has
+        # to exist first. It is created EMPTY: every key inside it is written by
+        # the Deevnet API, one per tenant (ADR-0012 section 6).
+        #
+        # Whether this controller accepts an empty key list is undocumented.
+        # PpskProfile marks `ppsk` required but sets no minItems, so [] is legal
+        # by the published schema - and the running controller is ground truth,
+        # not the schema (see the ip-setting note below). So: try empty, and if
+        # it is refused, create with one random seed key and delete that key
+        # immediately, which lands in the same place. The seed is never reported,
+        # never reused, and does not outlive the play.
+        - name: Create the missing PPSK profiles, with no keys
+          # omada-api: documented createPPSKProfile spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/ppsk-profile"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body:
+              profileName: "{{ item.value.wifi_ppsk_profile }}"
+              ppsk: []
+            validate_certs: false
+          loop: "{{ omada_ppsk_profiles_missing }}"
+          loop_control:
+            label: "{{ item.value.wifi_ppsk_profile }}"
+          register: omada_ppsk_empty
+          # Deliberately never fatal: a refusal here is an answer, not a failure.
+          # The verify at the end of the play is what decides whether this worked.
+          failed_when: false
+
+        - name: Note which empty profiles the controller refused
+          ansible.builtin.set_fact:
+            omada_ppsk_seed_needed: >-
+              {{ omada_ppsk_empty.results | default([])
+                 | rejectattr('json.errorCode', 'defined') | map(attribute='item') | list
+                 + omada_ppsk_empty.results | default([])
+                   | selectattr('json.errorCode', 'defined')
+                   | rejectattr('json.errorCode', 'equalto', 0) | map(attribute='item') | list }}
+
+        - name: Say so, once, when this controller will not take an empty profile
+          ansible.builtin.debug:
+            msg: >-
+              This controller refused a PPSK profile with an empty key list
+              ({{ omada_ppsk_seed_needed | map(attribute='value.wifi_ppsk_profile') | list }});
+              creating each with a single seed key and removing it. Worth recording in CHG-0013.
+          when: omada_ppsk_seed_needed | length > 0
+
+        - name: Create the refused profiles with one seed key
+          # omada-api: documented createPPSKProfile spec 6.3.0.45
+          vars:
+            _seed: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) }}"
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/ppsk-profile"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body:
+              profileName: "{{ item.value.wifi_ppsk_profile }}"
+              ppsk:
+                - {name: "bootstrap", psk: "{{ _seed }}"}
+            validate_certs: false
+          loop: "{{ omada_ppsk_seed_needed }}"
+          loop_control:
+            label: "{{ item.value.wifi_ppsk_profile }}"
+          register: omada_ppsk_seeded
+          failed_when: omada_ppsk_seeded.json.errorCode | default(-1) != 0
+          no_log: true
+
+        - name: Remove the seed key, leaving the profile empty
+          # omada-api: documented deletePSKsToPPSKProfile spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/ppsk-profile/{{ item.json.result.id }}/delete-psk"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body:
+              ppskNameList: ["bootstrap"]
+            validate_certs: false
+          loop: "{{ omada_ppsk_seeded.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.value.wifi_ppsk_profile | default('') }}"
+          when: not (item.skipped | default(false))
+          register: omada_ppsk_seed_removed
+          failed_when:
+            - not (omada_ppsk_seed_removed.skipped | default(false))
+            - omada_ppsk_seed_removed.json.errorCode | default(-1) != 0
+
+        - name: Re-read the PPSK profiles, to resolve each segment's profile id
+          # omada-api: documented getPPSKProfiles spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/ppsk-profiles"
+            headers: "{{ omada_hdr }}"
+            validate_certs: false
+          register: omada_ppsk_now
+          failed_when: omada_ppsk_now.json.errorCode != 0
+
+        - name: Every ppsk segment must now have its profile
+          ansible.builtin.assert:
+            that:
+              - omada_segments_ppsk | map(attribute='value.wifi_ppsk_profile')
+                | reject('in', omada_ppsk_now.json.result | default([]) | map(attribute='profileName') | list)
+                | list | length == 0
+            fail_msg: >-
+              A PPSK profile is still missing after both the empty and the seeded attempt, so the
+              SSID that binds it cannot be created. Nothing further is written.
+            quiet: true
+
         - name: Create the missing SSIDs, each tagged to its segment's network
           # omada-api: documented createSsid spec 6.3.0.45
           vars:
             _net: >-
               {{ omada_networks_now.json.result.data | selectattr('vlan', 'defined')
                  | selectattr('vlan', 'equalto', item.value.vlan_id | int) | first }}
+            _ppsk: "{{ (item.value.wifi_security | default('psk')) == 'ppsk' }}"
+            _profile: >-
+              {{ (omada_ppsk_now.json.result | default([])
+                  | selectattr('profileName', 'equalto', item.value.wifi_ppsk_profile | default(''))
+                  | first | default({})).id | default('') }}
           ansible.builtin.uri:
             url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids"
             method: POST
             headers: "{{ omada_hdr }}"
             body_format: json
+            # A ppsk SSID is security 4 bound to its profile, and carries no key
+            # of its own. It still needs the pskSetting encryption block: the
+            # published schema marks pskSetting as relevant only to security 3
+            # and does not list it as required, but omitting it makes the
+            # controller answer errorCode -1 with no message (CHG-0005 phase 6,
+            # 2026-09-15). securityKey is left out - that one really is
+            # security-3 only.
             body: >-
               {{ omada_ssid_base | combine({
                    'name': item.value.wifi_ssid,
                    'guestNetEnable': item.key == 'guest',
                    'vlanId': item.value.vlan_id | int,
-                   'vlanSetting': {'mode': 1, 'customConfig': {'customMode': 0, 'lanNetworkId': _net.id}},
-                   'pskSetting': {'securityKey': deevnet_wifi_psk[item.key], 'versionPsk': 2,
-                                  'encryptionPsk': 3, 'gikRekeyPskEnable': false}}) }}
+                   'vlanSetting': {'mode': 1, 'customConfig': {'customMode': 0, 'lanNetworkId': _net.id}}})
+                 | combine({'security': 4,
+                            'ppskSetting': {'ppskProfileId': _profile},
+                            'pskSetting': {'versionPsk': 2, 'encryptionPsk': 3,
+                                           'gikRekeyPskEnable': false}}
+                           if _ppsk | bool else
+                           {'pskSetting': {'securityKey': deevnet_wifi_psk[item.key], 'versionPsk': 2,
+                                           'encryptionPsk': 3, 'gikRekeyPskEnable': false}}) }}
             validate_certs: false
           loop: "{{ omada_ssids_missing }}"
           loop_control:

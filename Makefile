@@ -1,5 +1,5 @@
 .PHONY: help default deps deps-force build install-dev install-user rebuild publish \
-        dns dhcp switch opnsense proxmox-net \
+        dns dhcp switch opnsense proxmox-net wireless \
         preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
         migration-opnsense-assign migration-opnsense-temp-fw \
@@ -70,6 +70,11 @@ help:
 "  switch" \
 "      Configure switch VLANs over the CLI - standalone switches only; break-glass once a switch" \
 "      is controller-managed (ADR-0009). Decrypt inventory vault files first." \
+"" \
+"  wireless [APPLY=1] [ADOPT=1]" \
+"      Site wireless from inventory through the Omada Open API (ADR-0009): LAN networks, PPSK" \
+"      profiles, SSIDs and the AP. Plans without writing by default; APPLY=1 writes, ADOPT=1 also" \
+"      adopts a pending AP. Decrypt inventory vault files first." \
 "" \
 "  proxmox-net [TAGS=...]" \
 "      Configure a tenant hypervisor's bridge and VLAN sub-interfaces via the PVE API." \
@@ -162,6 +167,14 @@ proxmox-net: deps install-dev
 opnsense: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/opnsense.yml
+
+# Holding a segment out of a run (omada_segment_skip) stays a raw ansible-playbook
+# invocation - see the playbook header. It is exceptional, and its JSON quoting
+# does not survive a make variable intact.
+wireless: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/omada-wireless.yml \
+	  $(if $(APPLY),-e omada_apply=true,) $(if $(ADOPT),-e omada_apply=true -e omada_adopt=true,)
 
 
 # ---------- Inspection ----------
