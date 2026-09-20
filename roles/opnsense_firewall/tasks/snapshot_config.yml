@@ -1,0 +1,84 @@
+---
+# Take the pre-apply configuration snapshot.
+#
+# Runs BEFORE any rule is written, because every API write creates a new
+# revision in the router's own /conf/backup history: by the time the apply
+# handler fires, the newest revision already contains the change we might want
+# to undo. What is recorded here is the last revision from before this run.
+#
+# Two things are taken:
+#   1. The newest revision id, e.g. config-1789702628.4244.xml. This is what
+#      core/backup/revertBackup takes, and what to pick at the console under
+#      "Restore a backup" if the network route is gone.
+#   2. The running configuration itself, downloaded to the control host. A
+#      configuration that exists only on the router is no use when the router
+#      is what you cannot reach.
+#
+# Skipped entirely on a plan run - nothing is being written, so there is
+# nothing to roll back to.
+
+- name: List the router's configuration revisions
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/core/backup/backups/this"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: _fw_backups
+  changed_when: false
+  delegate_to: localhost
+
+- name: Record the revision to roll back to
+  ansible.builtin.set_fact:
+    _fw_pre_revision: "{{ (_fw_backups.json.items | default([]) | first | default({})).id | default('') }}"
+    _fw_pre_revision_iso: "{{ (_fw_backups.json.items | default([]) | first | default({})).time_iso | default('unknown') }}"
+
+- name: Refuse to apply without a revision to roll back to
+  ansible.builtin.assert:
+    that:
+      - _fw_pre_revision | length > 0
+    fail_msg: >-
+      core/backup/backups/this returned no configuration revision, so there is
+      nothing to roll back to and no automatic undo for this apply. Fix the
+      read, or set firewall_rollback_on_failure=false deliberately and apply
+      with the console connected.
+    success_msg: >-
+      Rollback target: {{ _fw_pre_revision }} ({{ _fw_pre_revision_iso }}).
+  when: firewall_rollback_on_failure | bool
+
+- name: Make sure the local configuration backup directory exists
+  ansible.builtin.file:
+    path: "{{ firewall_config_backup_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+
+# The full router configuration, secrets included. The directory is gitignored
+# in this collection; keep it that way, and delete the file once the change is
+# closed.
+- name: Download the running configuration to the control host
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/core/backup/download/this"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    dest: "{{ _fw_config_backup_file }}"
+    mode: "0600"
+  vars:
+    _fw_config_backup_file: >-
+      {{ firewall_config_backup_dir }}/{{ inventory_hostname }}-pre-firewall-{{
+         lookup('pipe', 'date +%Y%m%d-%H%M%S') }}.xml
+  register: _fw_config_download
+  changed_when: true
+  delegate_to: localhost
+
+- name: Report the snapshot
+  ansible.builtin.debug:
+    msg: >-
+      Pre-apply snapshot taken. Revision to roll back to: {{ _fw_pre_revision }}
+      ({{ _fw_pre_revision_iso }}). Configuration downloaded to
+      {{ _fw_config_download.dest | default('(not written)') }}.

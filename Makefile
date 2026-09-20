@@ -24,6 +24,11 @@ MIGRATION_TS      = $(shell date +%Y%m%d-%H%M%S)
 # at some other inventory.
 MIGRATION_INV     ?= ../ansible-inventory-deevnet/mobile
 
+# Extra ansible-playbook arguments, passed through by the migration targets that
+# support it. Used to turn on a role's apply switch for one run without putting
+# it in inventory, e.g. EXTRA_ARGS="-e firewall_apply=true".
+EXTRA_ARGS        ?=
+
 # User-level collections (shared across repos)
 USER_COLLECTIONS_PATH    ?= $(HOME)/.ansible/collections
 
@@ -290,11 +295,19 @@ migration-opnsense-interfaces: deps install-dev
 	  -i "$(MIGRATION_INV)" 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-interfaces.log"
 
+# The role reports and writes nothing by default. To apply:
+#   make migration-opnsense-firewall EXTRA_ARGS="-e firewall_apply=true"
+# and, for a one-off reconcile that also removes undeclared rules:
+#   ... EXTRA_ARGS="-e firewall_apply=true -e firewall_delete_unmanaged=true"
+# Deletion is never set in inventory. pipefail is set because the log is piped
+# through tee, which would otherwise mask a failed play as a successful make.
+migration-opnsense-firewall: SHELL := /bin/bash
+migration-opnsense-firewall: .SHELLFLAGS := -o pipefail -c
 migration-opnsense-firewall: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/07-opnsense-firewall.yml \
-	  -i "$(MIGRATION_INV)" 2>&1 \
+	  -i "$(MIGRATION_INV)" $(EXTRA_ARGS) 2>&1 \
 	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-firewall.log"
 
 migration-switch-access-ports: deps install-dev
