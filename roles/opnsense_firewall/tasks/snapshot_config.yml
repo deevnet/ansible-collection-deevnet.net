@@ -30,10 +30,14 @@
   changed_when: false
   delegate_to: localhost
 
+# json['items'], not json.items: on a dict, Jinja resolves the attribute to
+# Python's dict.items method before it looks for a key of that name, and the
+# error it produces ("'builtin_function_or_method' object is not iterable")
+# names neither the variable nor the cause.
 - name: Record the revision to roll back to
   ansible.builtin.set_fact:
-    _fw_pre_revision: "{{ (_fw_backups.json.items | default([]) | first | default({})).id | default('') }}"
-    _fw_pre_revision_iso: "{{ (_fw_backups.json.items | default([]) | first | default({})).time_iso | default('unknown') }}"
+    _fw_pre_revision: "{{ (_fw_backups.json['items'] | default([]) | first | default({})).id | default('') }}"
+    _fw_pre_revision_iso: "{{ (_fw_backups.json['items'] | default([]) | first | default({})).time_iso | default('unknown') }}"
 
 - name: Refuse to apply without a revision to roll back to
   ansible.builtin.assert:
@@ -81,4 +85,4 @@
     msg: >-
       Pre-apply snapshot taken. Revision to roll back to: {{ _fw_pre_revision }}
       ({{ _fw_pre_revision_iso }}). Configuration downloaded to
-      {{ _fw_config_download.dest | default('(not written)') }}.
+      {{ _fw_config_download.path | default(_fw_config_download.dest | default('(not written)', true), true) }}.

@@ -246,6 +246,31 @@
       role.
     success_msg: "Built {{ desired_rules | length }} desired rules."
 
+# A leading "!" is the web UI's syntax for a negated network. The API does not
+# take it - it answers `{"result":"failed"}` with
+# `'!10.20.0.0/16 is not a valid source IP address or alias.'` - and expects the
+# separate source_not / destination_not booleans instead. Inventory may write
+# either form; this is where the two meet.
+- name: Normalise negated networks into the API's not fields
+  ansible.builtin.set_fact:
+    _fw_normalised: >-
+      {{ _fw_normalised | default([]) + [ item | combine({
+           'source_net': _src | regex_replace('^!', ''),
+           'source_not': '1' if _src.startswith('!') else '0',
+           'destination_net': _dst | regex_replace('^!', ''),
+           'destination_not': '1' if _dst.startswith('!') else '0'
+         }) ] }}
+  vars:
+    _src: "{{ item.source_net | default('any', true) }}"
+    _dst: "{{ item.destination_net | default('any', true) }}"
+  loop: "{{ desired_rules }}"
+  loop_control:
+    label: "{{ item.description }}"
+
+- name: Adopt the normalised rules
+  ansible.builtin.set_fact:
+    desired_rules: "{{ _fw_normalised | default([]) }}"
+
 # Step 4: Categorize, with field-level differences
 - name: Split the desired rules into new and already present
   ansible.builtin.set_fact:
@@ -293,6 +318,10 @@
             if (_live.source_net | default('any')) != item.source_net else None),
            ({'field': 'destination_net', 'from': _live.destination_net | default('any'), 'to': item.destination_net}
             if (_live.destination_net | default('any')) != item.destination_net else None),
+           ({'field': 'source_not', 'from': _live.source_not | default('0') | string, 'to': item.source_not | default('0')}
+            if (_live.source_not | default('0') | string) != (item.source_not | default('0')) else None),
+           ({'field': 'destination_not', 'from': _live.destination_not | default('0') | string, 'to': item.destination_not | default('0')}
+            if (_live.destination_not | default('0') | string) != (item.destination_not | default('0')) else None),
            ({'field': 'destination_port', 'from': _live.destination_port | default(''), 'to': item.destination_port}
             if (_live.destination_port | default('')) != item.destination_port else None)
          ] | reject('none') | list }}
@@ -341,7 +370,7 @@
       ADD ({{ rules_to_add | length }}):
       {% for r in rules_to_add %}
         + {{ r.description }}
-            on {{ r.interface }} {{ r.direction }} {{ r.action }} proto {{ r.protocol }} {{ r.source_net }} -> {{ r.destination_net }}{{ ':' ~ r.destination_port if r.destination_port | length > 0 else '' }}
+            on {{ r.interface }} {{ r.direction }} {{ r.action }} proto {{ r.protocol }} {{ '!' if r.source_not | default('0') == '1' else '' }}{{ r.source_net }} -> {{ '!' if r.destination_not | default('0') == '1' else '' }}{{ r.destination_net }}{{ ':' ~ r.destination_port if r.destination_port | length > 0 else '' }}
       {% else %}
         (none)
       {% endfor %}
@@ -395,7 +424,9 @@
         ipprotocol: "inet"
         protocol: "{{ item.protocol | default('any', true) }}"
         source_net: "{{ item.source_net | default('any', true) }}"
+        source_not: "{{ item.source_not | default('0') }}"
         destination_net: "{{ item.destination_net | default('any', true) }}"
+        destination_not: "{{ item.destination_not | default('0') }}"
         destination_port: "{{ item.destination_port | default('') }}"
         description: "{{ item.description }}"
         sequence: "{{ item.sequence }}"
@@ -451,7 +482,9 @@
         ipprotocol: "inet"
         protocol: "{{ item.protocol | default('any', true) }}"
         source_net: "{{ item.source_net | default('any', true) }}"
+        source_not: "{{ item.source_not | default('0') }}"
         destination_net: "{{ item.destination_net | default('any', true) }}"
+        destination_not: "{{ item.destination_not | default('0') }}"
         destination_port: "{{ item.destination_port | default('') }}"
         description: "{{ item.description }}"
         sequence: "{{ item.sequence }}"
