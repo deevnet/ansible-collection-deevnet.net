@@ -8,6 +8,18 @@ opnsense_validate_certs: false
 # Prefix for managed rule descriptions (used for idempotency)
 firewall_managed_prefix: "ansible:"
 
+# --- Plan and apply ----------------------------------------------------------
+# The role REPORTS by default and writes nothing. Every add, update and
+# would-delete is named, with the fields that differ, and no addRule, setRule,
+# delRule or apply call is made. Writing is a deliberate act on the command
+# line: -e firewall_apply=true.
+#
+# `--check` is not a dry run for this role: ansible.builtin.uri declares
+# check_mode support: none, so Ansible SKIPS every writing task and the run
+# reports nothing pending whatever it would really do. That silence preceded
+# INC-0001. This variable is the dry run.
+firewall_apply: false
+
 # Anti-lockout: always allow management subnet to router on 443/22
 firewall_anti_lockout: true
 
@@ -48,20 +60,32 @@ firewall_protected_descriptions:
   - "{{ firewall_managed_prefix }} anti-lockout HTTPS management"
   - "{{ firewall_managed_prefix }} anti-lockout SSH management"
 
-# --- Apply and verify --------------------------------------------------------
+# --- Rollback ----------------------------------------------------------------
+# There is no savepoint. OPNsense 26.7.3_11 has no firewall/filter/savepoint,
+# /cancelRollback or /revert endpoint - each answers 404 "Endpoint not found",
+# where a POST-only endpoint such as addRule answers a GET with HTTP 200 and a
+# body. Upstream FilterController.php carries no such action, and applyAction()
+# takes no revision: it runs `filter reload skip_alias` and nothing else. The
+# role used to request a savepoint, fall through when none came back, and send
+# a cancelRollback that could never arrive. That guard was never real.
+#
+# What is real is the router's own configuration history in /conf/backup,
+# reachable over the API. Before the apply this role records the newest
+# revision id and downloads the running config to the control host. If the
+# apply severs a required path and the router is still reachable, it reverts to
+# that revision. If the router is NOT reachable the revert cannot be sent from
+# here either, and the play fails naming the exact revision to restore at the
+# console - which is the honest position, not a promise the API cannot keep.
+firewall_rollback_on_failure: true
 
-# Use OPNsense's rollback savepoint for the apply, so a change that severs the
-# control host is reverted by the router itself rather than by a person with a
-# console cable. Probed at run time: builds without the endpoint fall back to a
-# plain apply and say so.
-firewall_use_savepoint: true
+# Where the pre-apply configuration download is written, on the control host.
+# Keep it off the router: a config that only exists on the box is no use when
+# the box is what you cannot reach.
+firewall_config_backup_dir: "{{ playbook_dir }}/../../migration-logs"
 
-# Seconds the router waits for cancelRollback before reverting on its own. Must
-# comfortably exceed the reachability check below.
-firewall_savepoint_timeout: 120
-
+# --- Verify ------------------------------------------------------------------
 # After applying, prove from the control host that the paths which matter still
-# work. Failure leaves the savepoint uncancelled - which IS the rollback.
+# work. A failure here is what triggers the rollback above.
 firewall_verify_reachability: true
 firewall_reachability_timeout: 10
 

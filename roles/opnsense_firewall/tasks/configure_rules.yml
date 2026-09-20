@@ -3,11 +3,18 @@
 #
 # Strategy:
 #   1. Fetch current rules from the filter API
-#   2. Build mapping of managed rules (keyed by composite identifier)
-#   3. Build desired rules from zone policies, internet zones, and anti-lockout
-#   4. Categorize into add / update / delete
-#   5. Execute changes via addRule / setRule / delRule
-#   6. Notify handler to apply
+#   2. Index the managed rules, keeping every row - descriptions are not unique
+#   3. Build desired rules from zone policies, internet zones, gateway services
+#      and anti-lockout
+#   4. Categorize into add / update / delete, with field-level differences
+#   5. REPORT everything (always), and execute only when firewall_apply is true
+#   6. Notify the handler to apply
+#
+# The role reports by default and writes nothing. `--check` is not a dry run
+# here - ansible.builtin.uri declares check_mode support: none, so Ansible skips
+# every writing task and a clean check run reads as "nothing to change" whatever
+# the real run would do. That silence preceded INC-0001. firewall_apply is the
+# dry run.
 
 # Step 1: Fetch current firewall rules
 - name: Get current firewall rules
@@ -26,42 +33,41 @@
       searchPhrase: "{{ firewall_managed_prefix }}"
     return_content: true
   register: current_rules
+  changed_when: false
   delegate_to: localhost
 
-- name: Display current managed rules count
-  ansible.builtin.debug:
-    msg: "Found {{ current_rules.json.rows | default([]) | length }} existing managed firewall rules"
+# Step 2: Index the managed rules
+#
+# Descriptions are NOT unique on the router. On 2026-09-19 the live table held
+# 25 managed rules under 13 distinct descriptions - twelve `temp-allow-all-optN`
+# entries present twice each, plus one `test-rule`. A description-keyed dict
+# therefore loses one row of every pair, and a reconcile built from it would
+# have deleted 13 rules and left 12 allow-all rules quietly in place. Keep every
+# row; index by description only for the update comparison.
+- name: Select the managed rules from the router's rule table
+  ansible.builtin.set_fact:
+    _fw_managed_rows: >-
+      {{ current_rules.json.rows | default([])
+         | selectattr('description', 'defined')
+         | selectattr('description', 'match', firewall_managed_prefix ~ '.*')
+         | list }}
 
-# Step 2: Build existing rules mapping keyed by description
-- name: Build existing rules by description
+- name: Report what the router is holding
+  ansible.builtin.debug:
+    msg: >-
+      Found {{ _fw_managed_rows | length }} managed rules on the router under
+      {{ _fw_managed_rows | map(attribute='description') | unique | list | length }}
+      distinct descriptions
+      ({{ current_rules.json.rows | default([]) | length }} rows returned in total).
+
+# dict() over reversed rows: later keys win, so reversing makes the FIRST
+# occurrence of each description the one that survives. Everything else is a
+# duplicate and becomes a deletion candidate below.
+- name: Index the managed rules by description, first occurrence winning
   ansible.builtin.set_fact:
     existing_rules_by_desc: >-
-      {{
-        existing_rules_by_desc | default({}) | combine({
-          (item.description | default('')): {
-            'uuid': item.uuid,
-            'enabled': item.enabled | default('0') | string,
-            'action': item.action | default(''),
-            'interface': item.interface | default(''),
-            'direction': item.direction | default(''),
-            'protocol': item.ipprotocol | default(''),
-            'source_net': item.source_net | default(''),
-            'destination_net': item.destination_net | default(''),
-            'destination_port': item.destination_port | default('')
-          }
-        })
-      }}
-  loop: "{{ current_rules.json.rows | default([]) }}"
-  loop_control:
-    label: "{{ item.description | default('?') }}"
-  when:
-    - item.description is defined
-    - item.description is match(firewall_managed_prefix ~ '.*')
-
-- name: Ensure existing_rules_by_desc is defined
-  ansible.builtin.set_fact:
-    existing_rules_by_desc: {}
-  when: existing_rules_by_desc is not defined
+      {{ dict(_fw_managed_rows | reverse | list | map(attribute='description') | list
+              | zip(_fw_managed_rows | reverse | list)) }}
 
 # Step 3: Build desired rules list
 - name: Initialize desired rules
@@ -100,36 +106,66 @@
     - firewall_anti_lockout | bool
     - "'management' in zone_to_interface"
 
-# Step 3b: Established/related conntrack rules per VLAN interface
-# This builds a plain `pass` rule. It previously also set `quick: true` and
-# `state: "established,related"`, but the addRule body below never sent either
-# field, so they described an intent the router never received. They are removed
-# rather than sent under guessed field names.
+# Step 3b: Gateway services - each zone reaches its OWN gateway for DNS and DHCP
 #
-# Whether these rules are needed at all is a separate question worth settling
-# before the policy is first applied: pf creates state on a passing rule by
-# default, so an explicit established/related pass may be redundant.
-- name: Build conntrack rules for each zone
+# These replace the per-interface conntrack rules, which described an intent the
+# router never received (`quick` and `state` were built but never sent) and were
+# redundant anyway - pf creates state on a passing rule by default.
+#
+# The gap they were hiding is real, and it is why these rules exist: the router
+# generates nothing that lets a VLAN client reach its gateway's DNS or DHCP
+# server. Its only automatic DHCP rules are the client rules on WAN. Observed on
+# the rule listing, 2026-09-14, not from vendor documentation. Without these,
+# removing allow-all takes DNS away from every zone - including the control host,
+# whose resolver IS 10.20.99.1 - and every DHCP lease with it.
+#
+# Read off the router on 2026-09-19, so neither is a guess:
+#   - `protocol` accepts "TCP/UDP" as one value, so DNS is one rule, not two.
+#   - `<identifier>ip` (opt4ip, opt8ip, lanip ...) is a valid destination, as is
+#     `any`; both appear in firewall/filter/listNetworkSelectOptions.
+#
+# Source is `any`, not the zone subnet. An inbound interface rule is already
+# scoped by the interface it sits on, and `any` is what makes these work for the
+# two cases a subnet source would break: DHCP discovery, which has no lease and
+# so no in-subnet source address, and tenant overlay traffic arriving on
+# tenant_transit from 10.20.128.0/18 rather than from 10.20.50.0/24.
+#
+# DHCP's destination is `any`, not the interface address: DISCOVER is sent to
+# 255.255.255.255, which no interface-address rule would match.
+- name: Build gateway service rules for each zone
   ansible.builtin.set_fact:
-    desired_rules: "{{ desired_rules + [_conntrack_rule] }}"
-    _seq: "{{ _seq | int + firewall_sequence_step | int }}"
+    desired_rules: "{{ desired_rules + [_dns_rule] + ([_dhcp_rule] if _dhcp else []) }}"
+    _seq: "{{ _seq | int + (firewall_sequence_step | int * (2 if _dhcp else 1)) }}"
   vars:
     _iface: "{{ zone_to_interface[item.key].identifier | default('') }}"
-    _conntrack_rule:
-      description: "{{ firewall_managed_prefix }} conntrack established/related {{ item.key }}"
+    _dhcp: "{{ deevnet_vlans[item.key].dhcp_enabled | default(true) | bool }}"
+    _dns_rule:
+      description: "{{ firewall_managed_prefix }} gateway services DNS {{ item.key }}"
       interface: "{{ _iface }}"
       direction: "in"
       action: "pass"
-      protocol: ""
-      source_net: ""
-      destination_net: ""
-      destination_port: ""
+      protocol: "TCP/UDP"
+      source_net: "any"
+      destination_net: "{{ _iface }}ip"
+      destination_port: "53"
       sequence: "{{ _seq | int }}"
+    _dhcp_rule:
+      description: "{{ firewall_managed_prefix }} gateway services DHCP {{ item.key }}"
+      interface: "{{ _iface }}"
+      direction: "in"
+      action: "pass"
+      protocol: "UDP"
+      source_net: "any"
+      destination_net: "any"
+      destination_port: "67"
+      sequence: "{{ _seq | int + firewall_sequence_step | int }}"
   loop: "{{ zone_to_interface | dict2items }}"
   loop_control:
-    label: "conntrack: {{ item.key }}"
+    label: "gateway services: {{ item.key }}{{ ' (DNS+DHCP)' if _dhcp else ' (DNS)' }}"
   when:
     - _iface | length > 0
+    - item.key in deevnet_vlans
+    - deevnet_vlans[item.key].gateway is defined
 
 # Step 3c: Zone policy rules from firewall_zone_policies
 - name: Build zone policy rules
@@ -152,7 +188,7 @@
       interface: "{{ _from_iface }}"
       direction: "in"
       action: "{{ item.action | default('pass') }}"
-      protocol: "{{ item.protocol | default('') }}"
+      protocol: "{{ item.protocol | default('any', true) }}"
       source_net: "{{ item.source_net | default(_from_subnet, true) }}"
       destination_net: "{{ item.destination_net | default(_to_subnet, true) }}"
       destination_port: "{{ item.destination_port | default('') }}"
@@ -180,7 +216,7 @@
       interface: "{{ _iface }}"
       direction: "in"
       action: "pass"
-      protocol: ""
+      protocol: "any"
       source_net: "{{ _subnet }}"
       destination_net: "!10.20.0.0/16"
       destination_port: ""
@@ -192,10 +228,6 @@
     - item in zone_to_interface
     - _iface | length > 0
     - _subnet | length > 0
-
-- name: Display desired rules count
-  ansible.builtin.debug:
-    msg: "Desired managed rules: {{ desired_rules | length }}"
 
 # The second half of the guard in discover_interfaces.yml. Discovery can succeed
 # while the desired set still comes out empty - an inventory with no policies, a
@@ -214,38 +246,137 @@
       role.
     success_msg: "Built {{ desired_rules | length }} desired rules."
 
-# Step 4: Categorize rules into add / update / delete
-- name: Categorize rules for processing
+# Step 4: Categorize, with field-level differences
+- name: Split the desired rules into new and already present
   ansible.builtin.set_fact:
     rules_to_add: >-
-      {{
-        desired_rules
-        | rejectattr('description', 'in', existing_rules_by_desc.keys() | list)
-        | list
-      }}
+      {{ desired_rules
+         | rejectattr('description', 'in', existing_rules_by_desc.keys() | list)
+         | list }}
+    _fw_rules_present: >-
+      {{ desired_rules
+         | selectattr('description', 'in', existing_rules_by_desc.keys() | list)
+         | list }}
+    _fw_rule_diffs: []
+
+# The comparison is built once, here, and drives both the report and the update
+# task's condition - so the plan cannot disagree with what an apply would do.
+#
+# The router returns `any` for an unset protocol, source or destination, and ''
+# for an unset port. The role used to send '' for the first three and compare
+# against '', which made every rule read as changed on every run. It also stored
+# `ipprotocol` under the key `protocol`, so the real protocol was never compared
+# at all.
+- name: Compare each declared rule with the router's copy
+  ansible.builtin.set_fact:
+    _fw_rule_diffs: >-
+      {{ _fw_rule_diffs + ([{
+           'description': item.description,
+           'uuid': _live.uuid,
+           'fields': _changed
+         }] if _changed | length > 0 else []) }}
+  vars:
+    _live: "{{ existing_rules_by_desc[item.description] }}"
+    _changed: >-
+      {{ [
+           ({'field': 'enabled', 'from': _live.enabled | default('0') | string, 'to': '1'}
+            if (_live.enabled | default('0') | string) != '1' else None),
+           ({'field': 'action', 'from': _live.action | default(''), 'to': item.action}
+            if (_live.action | default('')) != item.action else None),
+           ({'field': 'interface', 'from': _live.interface | default(''), 'to': item.interface}
+            if (_live.interface | default('')) != item.interface else None),
+           ({'field': 'direction', 'from': _live.direction | default(''), 'to': item.direction}
+            if (_live.direction | default('')) != item.direction else None),
+           ({'field': 'protocol', 'from': _live.protocol | default('any'), 'to': item.protocol}
+            if (_live.protocol | default('any')) != item.protocol else None),
+           ({'field': 'source_net', 'from': _live.source_net | default('any'), 'to': item.source_net}
+            if (_live.source_net | default('any')) != item.source_net else None),
+           ({'field': 'destination_net', 'from': _live.destination_net | default('any'), 'to': item.destination_net}
+            if (_live.destination_net | default('any')) != item.destination_net else None),
+           ({'field': 'destination_port', 'from': _live.destination_port | default(''), 'to': item.destination_port}
+            if (_live.destination_port | default('')) != item.destination_port else None)
+         ] | reject('none') | list }}
+  loop: "{{ _fw_rules_present }}"
+  loop_control:
+    label: "{{ item.description }}"
+
+- name: Collect the rules that need updating
+  ansible.builtin.set_fact:
     rules_to_update: >-
-      {{
-        desired_rules
-        | selectattr('description', 'in', existing_rules_by_desc.keys() | list)
-        | list
-      }}
+      {{ desired_rules
+         | selectattr('description', 'in', _fw_rule_diffs | map(attribute='description') | list)
+         | list }}
+
+# Every managed row that is not the one kept copy of a declared rule: rules
+# inventory no longer declares, AND duplicate copies of rules it does. Keyed on
+# uuid, because description does not identify a row.
+#
+# Protected descriptions are excluded even when the row is a duplicate. Deleting
+# a second copy of an anti-lockout rule is not worth the risk of getting the
+# reasoning wrong about which copy is live.
+- name: Collect the managed rules that should not be there
+  ansible.builtin.set_fact:
     rules_to_delete: >-
-      {{
-        existing_rules_by_desc | dict2items
-        | rejectattr('key', 'in', desired_rules | map(attribute='description') | list)
-        | rejectattr('key', 'in', firewall_protected_descriptions)
-        | list
-      }}
+      {{ _fw_managed_rows
+         | rejectattr('uuid', 'in', _fw_keep_uuids)
+         | rejectattr('description', 'in', firewall_protected_descriptions)
+         | list }}
+  vars:
+    _fw_keep_uuids: >-
+      {{ existing_rules_by_desc | dict2items
+         | selectattr('key', 'in', desired_rules | map(attribute='description') | list)
+         | map(attribute='value.uuid') | list }}
 
-- name: Display categorized rules
+# Step 5: Report. Always, and before anything is written.
+- name: Report the plan
   ansible.builtin.debug:
-    msg: |
-      Rules to add: {{ rules_to_add | length }}
-      Rules to check/update: {{ rules_to_update | length }}
-      Rules undeclared: {{ rules_to_delete | length }}{{ '' if firewall_delete_unmanaged | bool else ' (will be left in place)' }}
-      Protected from deletion: {{ firewall_protected_descriptions | length }}
+    msg: "{{ _report.split('\n') }}"
+  vars:
+    _desired_descs: "{{ desired_rules | map(attribute='description') | list }}"
+    _report: |-
+      {{ 'APPLY - the changes below will be written.'
+         if firewall_apply | bool
+         else 'PLAN ONLY - nothing will be written. Re-run with -e firewall_apply=true to apply.' }}
 
-# Step 5a: Add new rules
+      ADD ({{ rules_to_add | length }}):
+      {% for r in rules_to_add %}
+        + {{ r.description }}
+            on {{ r.interface }} {{ r.direction }} {{ r.action }} proto {{ r.protocol }} {{ r.source_net }} -> {{ r.destination_net }}{{ ':' ~ r.destination_port if r.destination_port | length > 0 else '' }}
+      {% else %}
+        (none)
+      {% endfor %}
+
+      UPDATE ({{ _fw_rule_diffs | length }} of {{ _fw_rules_present | length }} already present):
+      {% for d in _fw_rule_diffs %}
+        ~ {{ d.description }}  [{{ d.uuid }}]
+      {% for f in d.fields %}
+            {{ f.field }}: {{ f.from | default('(empty)', true) }} -> {{ f.to | default('(empty)', true) }}
+      {% endfor %}
+      {% else %}
+        (none - the router's copy matches inventory)
+      {% endfor %}
+
+      DELETE ({{ rules_to_delete | length }}){{ '' if firewall_delete_unmanaged | bool else ' - LEFT IN PLACE, firewall_delete_unmanaged is false' }}:
+      {% for r in rules_to_delete %}
+        - {{ r.description }}  [{{ r.uuid }}] on {{ r.interface }}  ({{ 'duplicate copy' if r.description in _desired_descs else 'not declared in inventory' }})
+      {% else %}
+        (none)
+      {% endfor %}
+
+      PROTECTED from deletion ({{ firewall_protected_descriptions | length }}):
+      {% for d in firewall_protected_descriptions %}
+        ! {{ d }}
+      {% endfor %}
+
+      Managed rules on the router: {{ _fw_managed_rows | length }} rows, {{ existing_rules_by_desc | length }} distinct descriptions.
+      Declared by inventory: {{ desired_rules | length }}.
+
+# Step 6a: Add new rules
+#
+# OPNsense reports a rejected rule as HTTP 200 with {"result":"failed"} and a
+# `validations` object naming the offending fields - confirmed on this build,
+# where even a GET to addRule answers 200 {"result":"failed"}. Checking the
+# status code alone therefore reports every rejection as a success.
 - name: Add new firewall rules
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/firewall/filter/addRule"
@@ -262,24 +393,47 @@
         interface: "{{ item.interface }}"
         direction: "{{ item.direction }}"
         ipprotocol: "inet"
-        protocol: "{{ item.protocol | default('') }}"
-        source_net: "{{ item.source_net | default('') }}"
-        destination_net: "{{ item.destination_net | default('') }}"
+        protocol: "{{ item.protocol | default('any', true) }}"
+        source_net: "{{ item.source_net | default('any', true) }}"
+        destination_net: "{{ item.destination_net | default('any', true) }}"
         destination_port: "{{ item.destination_port | default('') }}"
         description: "{{ item.description }}"
         sequence: "{{ item.sequence }}"
     status_code: [200, 201]
+    return_content: true
   loop: "{{ rules_to_add }}"
   loop_control:
     label: "Adding: {{ item.description }}"
-  when: rules_to_add | length > 0
-  register: add_results
+  when:
+    - firewall_apply | bool
+    - rules_to_add | length > 0
+  register: _fw_add
   delegate_to: localhost
   changed_when: true
   notify: apply firewall rules
 
-# Step 5b: Update existing rules if changed
-- name: Update existing firewall rules (if changed)
+# The loop is allowed to finish before failing, so the report names every
+# rejected rule rather than only the first. Nothing is applied either way: the
+# handler runs at the end of the play, and a failed play does not reach it.
+- name: Fail if the router rejected any added rule
+  ansible.builtin.fail:
+    msg: |-
+      The router accepted {{ _saved | length }} of {{ _sent | length }} rule additions.
+      Rejected:
+      {% for r in _sent %}
+      {% if (r.json | default({})).result | default('missing') != 'saved' %}
+        - {{ r.item.description }}
+            result: {{ (r.json | default({})).result | default('no JSON body') }}
+            {{ (r.json | default({})).validations | default('no validations returned') }}
+      {% endif %}
+      {% endfor %}
+  vars:
+    _sent: "{{ _fw_add.results | default([]) | rejectattr('skipped', 'defined') | list }}"
+    _saved: "{{ _sent | selectattr('json.result', 'defined') | selectattr('json.result', 'equalto', 'saved') | list }}"
+  when: _sent | length != _saved | length
+
+# Step 6b: Update existing rules if changed
+- name: Update existing firewall rules
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/firewall/filter/setRule/{{ existing_rules_by_desc[item.description].uuid }}"
     method: POST
@@ -295,72 +449,94 @@
         interface: "{{ item.interface }}"
         direction: "{{ item.direction }}"
         ipprotocol: "inet"
-        protocol: "{{ item.protocol | default('') }}"
-        source_net: "{{ item.source_net | default('') }}"
-        destination_net: "{{ item.destination_net | default('') }}"
+        protocol: "{{ item.protocol | default('any', true) }}"
+        source_net: "{{ item.source_net | default('any', true) }}"
+        destination_net: "{{ item.destination_net | default('any', true) }}"
         destination_port: "{{ item.destination_port | default('') }}"
         description: "{{ item.description }}"
         sequence: "{{ item.sequence }}"
     status_code: [200, 201]
+    return_content: true
   loop: "{{ rules_to_update }}"
   loop_control:
     label: "Updating: {{ item.description }}"
   when:
+    - firewall_apply | bool
     - rules_to_update | length > 0
-    - >-
-      existing_rules_by_desc[item.description].action != item.action or
-      existing_rules_by_desc[item.description].interface != item.interface or
-      existing_rules_by_desc[item.description].source_net != (item.source_net | default('')) or
-      existing_rules_by_desc[item.description].destination_net != (item.destination_net | default('')) or
-      existing_rules_by_desc[item.description].destination_port != (item.destination_port | default(''))
-  register: update_results
+  register: _fw_update
   delegate_to: localhost
   changed_when: true
   notify: apply firewall rules
 
-# Step 5c: Delete managed rules inventory no longer declares
-#
-# Gated, like opnsense_dns and opnsense_dhcp. This role reconciles by
-# subtraction, so this task is the one capable of removing the policy that
-# carries its own control path - and it is the reason a broken discovery became
-# a site outage rather than a failed play.
-- name: Report rules inventory no longer declares
-  ansible.builtin.debug:
-    msg: |
-      Managed rules not present in inventory:
-      {{ rules_to_delete | map(attribute='key') | list | join(', ') | default('none', true) }}
-      {{ 'These will be DELETED (firewall_delete_unmanaged is true).'
-         if firewall_delete_unmanaged | bool
-         else 'These are being LEFT IN PLACE. Set firewall_delete_unmanaged=true to remove them.' }}
-  when: rules_to_delete | length > 0
+- name: Fail if the router rejected any updated rule
+  ansible.builtin.fail:
+    msg: |-
+      The router accepted {{ _saved | length }} of {{ _sent | length }} rule updates.
+      Rejected:
+      {% for r in _sent %}
+      {% if (r.json | default({})).result | default('missing') != 'saved' %}
+        - {{ r.item.description }}
+            result: {{ (r.json | default({})).result | default('no JSON body') }}
+            {{ (r.json | default({})).validations | default('no validations returned') }}
+      {% endif %}
+      {% endfor %}
+  vars:
+    _sent: "{{ _fw_update.results | default([]) | rejectattr('skipped', 'defined') | list }}"
+    _saved: "{{ _sent | selectattr('json.result', 'defined') | selectattr('json.result', 'equalto', 'saved') | list }}"
+  when: _sent | length != _saved | length
 
-- name: Delete orphaned firewall rules
+# Step 6c: Delete managed rules that should not be there
+#
+# Gated twice: firewall_apply, and firewall_delete_unmanaged. This role
+# reconciles by subtraction, so this task is the one capable of removing the
+# policy that carries its own control path - and it is the reason a broken
+# discovery became a site outage rather than a failed play.
+- name: Delete the managed rules that should not be there
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/firewall/filter/delRule/{{ item.value.uuid }}"
+    url: "{{ opnsense_api_url }}/firewall/filter/delRule/{{ item.uuid }}"
     method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     status_code: [200, 201]
+    return_content: true
   loop: "{{ rules_to_delete }}"
   loop_control:
-    label: "Deleting: {{ item.key }}"
+    label: "Deleting: {{ item.description }} [{{ item.uuid }}]"
   when:
+    - firewall_apply | bool
     - firewall_delete_unmanaged | bool
     - rules_to_delete | length > 0
-  register: delete_results
+  register: _fw_delete
   delegate_to: localhost
   changed_when: true
   notify: apply firewall rules
 
-# Step 6: Report results
-- name: Report firewall configuration results
+- name: Fail if the router rejected any deletion
+  ansible.builtin.fail:
+    msg: |-
+      The router accepted {{ _done | length }} of {{ _sent | length }} rule deletions.
+      Rejected:
+      {% for r in _sent %}
+      {% if (r.json | default({})).result | default('missing') not in ['deleted', 'saved'] %}
+        - {{ r.item.description }} [{{ r.item.uuid }}]
+            result: {{ (r.json | default({})).result | default('no JSON body') }}
+      {% endif %}
+      {% endfor %}
+  vars:
+    _sent: "{{ _fw_delete.results | default([]) | rejectattr('skipped', 'defined') | list }}"
+    _done: "{{ _sent | selectattr('json.result', 'defined')
+               | selectattr('json.result', 'in', ['deleted', 'saved']) | list }}"
+  when: _sent | length != _done | length
+
+# Step 7: Report what actually happened
+- name: Report the outcome
   ansible.builtin.debug:
-    msg: |
-      Firewall rule configuration complete:
-      - Added: {{ rules_to_add | length }}
-      - Checked for updates: {{ rules_to_update | length }}
-      - Deleted: {{ rules_to_delete | length if firewall_delete_unmanaged | bool else 0 }}
-      - Undeclared, left in place: {{ 0 if firewall_delete_unmanaged | bool else rules_to_delete | length }}
-      - Total desired rules: {{ desired_rules | length }}
+    msg: >-
+      {{ 'Nothing was written: this was a plan run (firewall_apply is false).'
+         if not firewall_apply | bool
+         else 'Added ' ~ (rules_to_add | length) ~ ', updated ' ~ (rules_to_update | length) ~ ', deleted ' ~
+              ((rules_to_delete | length) if firewall_delete_unmanaged | bool else 0) ~
+              ((', left ' ~ (rules_to_delete | length) ~ ' undeclared rule(s) in place')
+               if not firewall_delete_unmanaged | bool and rules_to_delete | length > 0 else '') ~ '.' }}

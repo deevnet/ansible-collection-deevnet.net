@@ -26,5 +26,13 @@
 - name: Discover VLAN interface mappings
   ansible.builtin.include_tasks: discover_interfaces.yml
 
+# Before anything is written, and only when something will be. Every API write
+# creates a configuration revision on the router, so the revision to roll back
+# to has to be read before the first one - not in the apply handler, which runs
+# after them all.
+- name: Snapshot the configuration to roll back to
+  ansible.builtin.include_tasks: snapshot_config.yml
+  when: firewall_apply | bool
+
 - name: Configure firewall rules
   ansible.builtin.include_tasks: configure_rules.yml
