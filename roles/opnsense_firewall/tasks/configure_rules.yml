@@ -121,6 +121,14 @@
 #
 # Read off the router on 2026-09-19, so neither is a guess:
 #   - `protocol` accepts "TCP/UDP" as one value, so DNS is one rule, not two.
+#
+# NTP was added on 2026-09-19, after the first apply: the only internal traffic
+# the new policy dropped was 10.20.99.x -> 10.20.99.1:123. The router runs ntpd
+# on every interface and a DHCP client with no explicit ntpserver option falls
+# back to its gateway, so removing allow-all took time sync away silently -
+# clocks drift rather than anything failing outright. It matters most where
+# there is no alternative: `storage` is deliberately absent from
+# firewall_internet_zones, so its gateway is the only time source it can have.
 #   - `<identifier>ip` (opt4ip, opt8ip, lanip ...) is a valid destination, as is
 #     `any`; both appear in firewall/filter/listNetworkSelectOptions.
 #
@@ -134,8 +142,8 @@
 # 255.255.255.255, which no interface-address rule would match.
 - name: Build gateway service rules for each zone
   ansible.builtin.set_fact:
-    desired_rules: "{{ desired_rules + [_dns_rule] + ([_dhcp_rule] if _dhcp else []) }}"
-    _seq: "{{ _seq | int + (firewall_sequence_step | int * (2 if _dhcp else 1)) }}"
+    desired_rules: "{{ desired_rules + [_dns_rule, _ntp_rule] + ([_dhcp_rule] if _dhcp else []) }}"
+    _seq: "{{ _seq | int + (firewall_sequence_step | int * (3 if _dhcp else 2)) }}"
   vars:
     _iface: "{{ zone_to_interface[item.key].identifier | default('') }}"
     _dhcp: "{{ deevnet_vlans[item.key].dhcp_enabled | default(true) | bool }}"
@@ -149,6 +157,16 @@
       destination_net: "{{ _iface }}ip"
       destination_port: "53"
       sequence: "{{ _seq | int }}"
+    _ntp_rule:
+      description: "{{ firewall_managed_prefix }} gateway services NTP {{ item.key }}"
+      interface: "{{ _iface }}"
+      direction: "in"
+      action: "pass"
+      protocol: "UDP"
+      source_net: "any"
+      destination_net: "{{ _iface }}ip"
+      destination_port: "123"
+      sequence: "{{ _seq | int + firewall_sequence_step | int }}"
     _dhcp_rule:
       description: "{{ firewall_managed_prefix }} gateway services DHCP {{ item.key }}"
       interface: "{{ _iface }}"
@@ -158,10 +176,10 @@
       source_net: "any"
       destination_net: "any"
       destination_port: "67"
-      sequence: "{{ _seq | int + firewall_sequence_step | int }}"
+      sequence: "{{ _seq | int + (firewall_sequence_step | int * 2) }}"
   loop: "{{ zone_to_interface | dict2items }}"
   loop_control:
-    label: "gateway services: {{ item.key }}{{ ' (DNS+DHCP)' if _dhcp else ' (DNS)' }}"
+    label: "gateway services: {{ item.key }}{{ ' (DNS+NTP+DHCP)' if _dhcp else ' (DNS+NTP)' }}"
   when:
     - _iface | length > 0
     - item.key in deevnet_vlans
