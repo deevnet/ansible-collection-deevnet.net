@@ -74,6 +74,15 @@
     #   -e '{"omada_segment_skip":["iot"]}'
     omada_segment_skip: []
 
+    # Rewrite a shared key on the controller when it no longer matches
+    # deevnet_wifi_psk. Off by default and deliberately separate from
+    # omada_apply, because this is the one reconciliation that disconnects
+    # people: every client on that SSID drops and must be re-keyed by hand.
+    # Drift is always REPORTED; correcting it is a decision.
+    #
+    #   -e omada_apply=true -e omada_reconcile_psk=true
+    omada_reconcile_psk: false
+
     # The SSID settings CHG-0001's hand-configured SSIDs and the March migration
     # playbook used, kept so the controller-provisioned SSIDs behave the same.
     omada_ssid_base:
@@ -97,6 +106,8 @@
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids"}
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids/{ssidId}"}
+      - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids/{ssidId}/update-basic-config"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices"}
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}/start-adopt"}
       - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/general-config"}
@@ -355,6 +366,43 @@
         (item.vlanId | default(0) | int) != (_declared[item.name] | int)
         or (item.security | default(0) | int) != (_sec_wanted | int)
 
+    # The list endpoint does not return the key; the per-SSID detail endpoint
+    # does. One extra request per declared shared-key SSID, and it is the only
+    # way to know whether inventory and the controller still agree. Without it
+    # deevnet_wifi_psk is an assertion nothing checks - which is how it sat
+    # until CHG-0007 phase 3 happened to compare one by hand.
+    - name: Read each declared shared-key SSID in full, for its key
+      # omada-api: documented getSsid spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids/{{ item.ssidId | default(item.id) }}"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: omada_ssid_details
+      failed_when: omada_ssid_details.json.errorCode != 0
+      loop: >-
+        {{ omada_ssids_read.json.result.data
+           | selectattr('name', 'in', omada_segments_psk | map(attribute='value.wifi_ssid') | list) | list }}
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Find shared keys that no longer match inventory
+      vars:
+        _ssid_to_segment: >-
+          {{ dict(omada_segments_psk | map(attribute='value.wifi_ssid') | list
+                  | zip(omada_segments_psk | map(attribute='key') | list)) }}
+        _live: "{{ (item.json.result.pskSetting | default({})).securityKey | default('') }}"
+        _want: "{{ deevnet_wifi_psk[_ssid_to_segment[item.json.result.name]] | default('') }}"
+      ansible.builtin.set_fact:
+        omada_ssids_key_drift: >-
+          {{ omada_ssids_key_drift | default([]) + [item.json.result.name] }}
+      loop: "{{ omada_ssid_details.results | default([]) | rejectattr('skipped', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.json.result.name | default('?') }}"
+      when:
+        - _want | length > 0
+        - _live != _want
+      no_log: true          # the comparison touches both keys
+
     - name: Report
       ansible.builtin.debug:
         msg:
@@ -365,6 +413,14 @@
           ppsk_keys_are_api_owned_and_not_inspected: "{{ omada_segments_ppsk | map(attribute='value.wifi_ppsk_profile') | list }}"
           ssids_to_create: "{{ omada_ssids_missing | map(attribute='value.wifi_ssid') | list }}"
           ssids_that_differ_left_alone: "{{ omada_ssids_differ | default([]) }}"
+          ssids_whose_key_differs_from_inventory: >-
+            {{ (omada_ssids_key_drift | default([]))
+               if (omada_ssids_key_drift | default([]) | length) > 0
+               else 'none - every shared key matches deevnet_wifi_psk' }}
+          keys_would_be_rewritten: >-
+            {{ (omada_ssids_key_drift | default([]))
+               if (omada_apply | bool and omada_reconcile_psk | bool)
+               else 'no - omada_reconcile_psk is false, drift is reported only' }}
           ssids_not_in_inventory_left_in_place: "{{ omada_ssids_undeclared }}"
           ap: >-
             {{ omada_ap.mac }}:
@@ -515,6 +571,62 @@
               A PPSK profile is still missing after both the empty and the seeded attempt, so the
               SSID that binds it cannot be created. Nothing further is written.
             quiet: true
+
+        # Every client on the SSID drops when this lands. Gated separately from
+        # omada_apply for that reason, and it sends the SSID's current settings
+        # back unchanged apart from the key: update-basic-config requires band,
+        # broadcast, enable11r, guestNetEnable, mloEnable, name, pmfMode,
+        # security and vlanEnable, and anything omitted is reset rather than
+        # left alone.
+        - name: Rewrite a shared key that no longer matches inventory
+          # omada-api: documented updateSsidBasicConfig spec 6.3.0.45
+          vars:
+            _cur: "{{ item.json.result }}"
+            _seg: >-
+              {{ (omada_segments_psk
+                  | selectattr('value.wifi_ssid', 'equalto', _cur.name) | first).key }}
+          ansible.builtin.uri:
+            url: >-
+              {{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids/{{ _cur.ssidId | default(_cur.id) }}/update-basic-config
+            method: PATCH
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body: >-
+              {{ {
+                   'name': _cur.name,
+                   'band': _cur.band,
+                   'broadcast': _cur.broadcast,
+                   'enable11r': _cur.enable11r,
+                   'guestNetEnable': _cur.guestNetEnable,
+                   'mloEnable': _cur.mloEnable,
+                   'pmfMode': _cur.pmfMode,
+                   'security': _cur.security,
+                   'vlanEnable': _cur.vlanEnable,
+                   'vlanId': _cur.vlanId,
+                   'vlanSetting': _cur.vlanSetting,
+                   'pskSetting': (_cur.pskSetting | combine({'securityKey': deevnet_wifi_psk[_seg]}))
+                 } }}
+            validate_certs: false
+          loop: >-
+            {{ omada_ssid_details.results | default([]) | rejectattr('skipped', 'defined')
+               | selectattr('json.result.name', 'in', omada_ssids_key_drift | default([])) | list }}
+          loop_control:
+            label: "{{ item.json.result.name }}"
+          register: omada_key_rewritten
+          failed_when: omada_key_rewritten.json.errorCode | default(-1) != 0
+          changed_when: true
+          when: omada_reconcile_psk | bool
+          no_log: true          # the body carries the key
+
+        - name: Say which SSIDs were re-keyed
+          ansible.builtin.debug:
+            msg: >-
+              Re-keyed {{ omada_ssids_key_drift | default([]) | join(', ') }}.
+              Every client on {{ 'those SSIDs' if (omada_ssids_key_drift | default([]) | length) > 1 else 'that SSID' }}
+              has been disconnected and needs the new key.
+          when:
+            - omada_reconcile_psk | bool
+            - (omada_ssids_key_drift | default([]) | length) > 0
 
         - name: Create the missing SSIDs, each tagged to its segment's network
           # omada-api: documented createSsid spec 6.3.0.45

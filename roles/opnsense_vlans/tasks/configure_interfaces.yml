@@ -122,12 +122,21 @@
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
   loop: "{{ _vlans_needing_ip }}"
   loop_control:
     label: "{{ item.identifier }} ({{ item.name }})"
   when:
     - _vlans_needing_ip | length > 0
     - item.identifier != '?'
+  register: _vlan_reload_result
+  # This endpoint answers with `message`, not the `result` envelope the model
+  # controllers use, and its success value has not been observed - learning it
+  # means bouncing a live interface. So this asserts on the failure value,
+  # which HAS been observed: a rejected call returns {"message":"failed"}.
+  # Narrower than the checks on the model endpoints, and honest about why.
+  failed_when: >-
+    (_vlan_reload_result.json | default({})).message | default('') == 'failed'
   delegate_to: localhost
 
 # Step 6: Verify gateway reachability

@@ -58,6 +58,9 @@
         general:
           interfaces: "{{ _kea_all_interfaces | reject('equalto', 'wan') | join(',') }}"
     return_content: true
+  register: _api_set
+  failed_when: >-
+    (_api_set.json | default({})).result | default('') != 'saved'
   delegate_to: localhost
   when: _kea_needs_update
   notify: reconfigure dhcp

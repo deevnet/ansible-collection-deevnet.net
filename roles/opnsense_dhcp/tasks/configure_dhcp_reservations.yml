@@ -98,6 +98,9 @@
           tftp_server_name: "{{ item.pxe_tftp_server | default('') }}"
           boot_file_name: "{{ item.pxe_boot_file | default('') }}"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (add_results.json | default({})).result | default('') != 'saved'
   loop: "{{ reservations_to_add }}"
   loop_control:
     label: "Adding: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
@@ -128,6 +131,9 @@
           tftp_server_name: "{{ item.pxe_tftp_server | default('') }}"
           boot_file_name: "{{ item.pxe_boot_file | default('') }}"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (update_results.json | default({})).result | default('') != 'saved'
   loop: "{{ reservations_to_update }}"
   loop_control:
     label: "Updating: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
@@ -176,6 +182,10 @@
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     status_code: [200, 201]
+    return_content: true
+  register: _api_del_reservation
+  failed_when: >-
+    (_api_del_reservation.json | default({})).result | default('') not in ['deleted', 'saved']
   loop: "{{ reservations_undeclared }}"
   loop_control:
     label: "Deleting undeclared: {{ item.value.hostname | default(item.key) }} ({{ item.key }})"
@@ -193,6 +203,9 @@
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (delete_results.json | default({})).result | default('') not in ['deleted', 'saved']
   loop: "{{ dhcp_macs_to_remove | default([]) }}"
   loop_control:
     label: "Deleting reservation for MAC: {{ item }}"
