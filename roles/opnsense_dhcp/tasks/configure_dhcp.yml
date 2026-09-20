@@ -97,6 +97,9 @@
         hostname: "{{ item.hostname }}"
         description: "{{ item.description }}"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (add_results.json | default({})).result | default('') != 'saved'
   loop: "{{ reservations_to_add }}"
   loop_control:
     label: "Adding: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
@@ -124,6 +127,9 @@
         hostname: "{{ item.hostname }}"
         description: "{{ item.description }}"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (update_results.json | default({})).result | default('') != 'saved'
   loop: "{{ reservations_to_update }}"
   loop_control:
     label: "Updating: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
@@ -146,6 +152,9 @@
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (delete_results.json | default({})).result | default('') not in ['deleted', 'saved']
   loop: "{{ dhcp_macs_to_remove | default([]) }}"
   loop_control:
     label: "Deleting reservation for MAC: {{ item }}"

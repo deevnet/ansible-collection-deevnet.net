@@ -60,6 +60,9 @@
           domain_name: "{{ deevnet_root_domain | default('deevnet.net') }}"
         option_data_autocollect: "1"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (subnet_results.json | default({})).result | default('') != 'saved'
   loop: "{{ deevnet_vlans | dict2items }}"
   loop_control:
     label: "{{ item.key }}: {{ item.value.subnet | default('no subnet') }}"

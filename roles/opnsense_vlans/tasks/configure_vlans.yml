@@ -85,6 +85,9 @@
         tag: "{{ item.value.vlan_id }}"
         descr: "{{ item.key }}"
     status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (create_results.json | default({})).result | default('') != 'saved'
   loop: "{{ vlans_to_create }}"
   loop_control:
     label: "Creating VLAN {{ item.value.vlan_id }} ({{ item.key }})"

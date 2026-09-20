@@ -146,6 +146,9 @@
         domain: "{{ dns_domain }}"
         server: "{{ item.ip }}"
         description: "{{ dns_description_prefix }} - {{ item.hostname }}"
+    return_content: true
+  failed_when: >-
+    (add_override_results.json | default({})).result | default('') != 'saved'
   loop: "{{ overrides_to_add }}"
   loop_control:
     label: "Adding: {{ item.hostname }}.{{ dns_domain }} -> {{ item.ip }}"
@@ -172,6 +175,9 @@
         domain: "{{ dns_domain }}"
         server: "{{ item.ip }}"
         description: "{{ dns_description_prefix }} - {{ item.hostname }}"
+    return_content: true
+  failed_when: >-
+    (update_override_results.json | default({})).result | default('') != 'saved'
   loop: "{{ overrides_to_check }}"
   loop_control:
     label: "Checking: {{ item.hostname }}.{{ dns_domain }} ({{ existing_overrides_by_hostname[item.hostname].ip }} -> {{ item.ip }})"
@@ -283,6 +289,9 @@
         hostname: "{{ item.name }}"
         domain: "{{ dns_domain }}"
         description: "{{ dns_description_prefix }} - {{ item.name }} -> {{ item.target_host }}"
+    return_content: true
+  failed_when: >-
+    (add_alias_results.json | default({})).result | default('') != 'saved'
   loop: "{{ aliases_to_add }}"
   loop_control:
     label: "Adding: {{ item.name }}.{{ dns_domain }} -> {{ item.target_host }}"
@@ -322,6 +331,9 @@
         hostname: "{{ item.name }}"
         domain: "{{ dns_domain }}"
         description: "{{ dns_description_prefix }} - {{ item.name }} -> {{ item.target_host }}"
+    return_content: true
+  failed_when: >-
+    (update_alias_results.json | default({})).result | default('') != 'saved'
   loop: "{{ aliases_to_check }}"
   loop_control:
     label: "Checking: {{ item.name }}.{{ dns_domain }} -> {{ item.target_host }}"
@@ -394,6 +406,10 @@
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: _api_delhostalias
+  failed_when: >-
+    (_api_delhostalias.json | default({})).result | default('') not in ['deleted', 'saved']
   loop: "{{ aliases_to_delete }}"
   loop_control:
     label: "Deleting alias: {{ item.hostname }}.{{ item.domain }}"
@@ -410,6 +426,10 @@
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  register: _api_delhostoverride
+  failed_when: >-
+    (_api_delhostoverride.json | default({})).result | default('') not in ['deleted', 'saved']
   loop: "{{ overrides_to_delete }}"
   loop_control:
     label: "Deleting override: {{ item.hostname }}.{{ item.domain }} -> {{ item.ip }}"

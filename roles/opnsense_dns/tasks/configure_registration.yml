@@ -95,6 +95,7 @@
     body:
       unbound:
         general: "{{ _dns_registration_changes }}"
+    return_content: true
   register: _dns_registration_result
   # The task only runs when there is a difference, so a success here is always
   # a change. Anything short of `saved` is a failure: OPNsense answers 200 with
@@ -102,7 +103,7 @@
   # status check alone would report a silent no-op as success.
   changed_when: true
   failed_when: >-
-    _dns_registration_result.status != 200
+    (_dns_registration_result.json | default({})).result | default('') != 'saved'
     or (_dns_registration_result.json.result | default('')) != 'saved'
     or (_dns_registration_result.json.validations | default({}) | length > 0)
   when: _dns_registration_changes | length > 0
