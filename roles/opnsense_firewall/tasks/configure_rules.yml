@@ -236,7 +236,12 @@
       action: "pass"
       protocol: "any"
       source_net: "{{ _subnet }}"
-      destination_net: "!10.20.0.0/16"
+      # Internet means internet: not the private ranges (CHG-0023). A zone in
+      # firewall_internet_private_zones keeps the older, wider rule - everything
+      # outside the site's own space - for the operator's seats.
+      destination_net: >-
+        {{ '!' ~ firewall_site_supernet if item in firewall_internet_private_zones
+           else '!' ~ firewall_private_alias }}
       destination_port: ""
       sequence: "{{ _seq | int }}"
   loop: "{{ firewall_internet_zones | default([]) }}"
