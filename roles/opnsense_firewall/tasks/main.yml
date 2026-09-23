@@ -34,5 +34,8 @@
   ansible.builtin.include_tasks: snapshot_config.yml
   when: firewall_apply | bool
 
+- name: Configure the private-address alias the internet rules negate
+  ansible.builtin.include_tasks: configure_alias.yml
+
 - name: Configure firewall rules
   ansible.builtin.include_tasks: configure_rules.yml

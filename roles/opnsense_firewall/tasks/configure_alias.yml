@@ -1,0 +1,126 @@
+---
+# The private-address alias the internet rules negate (CHG-0023).
+#
+# An internet rule used to pass "!10.20.0.0/16" - everything outside the site's
+# own space, which is not the same as the internet: 192.168.0.0/16 and
+# 172.16.0.0/12 were reachable from guest, including the edge router's admin.
+# One rule can negate only one network, and pf expands a negated list into
+# separate rules that each match everything else, so the private ranges live in
+# an alias: pf holds it as one table, and "! <table>" negates the set.
+#
+# Same contract as the rules: reported always, written only with firewall_apply.
+# The filter apply runs `filter reload skip_alias`, so an alias change is loaded
+# by its own reconfigure call, before the rules that reference it are written.
+
+- name: Find the private-address alias
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/alias/search_item"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {current: 1, rowCount: -1, searchPhrase: "{{ firewall_private_alias }}"}
+    return_content: true
+  register: _fw_alias_search
+  changed_when: false
+  delegate_to: localhost
+
+- name: Read the alias as the router holds it
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/alias/get_item/{{ _fw_alias_row.uuid }}"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  vars:
+    _fw_alias_row: "{{ _fw_alias_search.json.rows | selectattr('name', 'equalto', firewall_private_alias) | first }}"
+  register: _fw_alias_live
+  changed_when: false
+  delegate_to: localhost
+  when: _fw_alias_search.json.rows | selectattr('name', 'equalto', firewall_private_alias) | list | length > 0
+
+- name: Compare the alias with inventory
+  ansible.builtin.set_fact:
+    _fw_alias_uuid: "{{ (_rows | first).uuid if _rows | length > 0 else '' }}"
+    _fw_alias_have: "{{ _have | sort }}"
+    _fw_alias_want: "{{ firewall_private_networks | sort }}"
+    _fw_alias_action: >-
+      {{ 'add' if _rows | length == 0
+         else ('update' if (_have | sort) != (firewall_private_networks | sort)
+                           or _live.enabled | default('1') != '1'
+               else 'none') }}
+  vars:
+    _rows: "{{ _fw_alias_search.json.rows | selectattr('name', 'equalto', firewall_private_alias) | list }}"
+    _live: "{{ (_fw_alias_live.json | default({})).alias | default({}) }}"
+    _have: >-
+      {{ (_live.content | default({})) | dict2items
+         | selectattr('value.selected', 'defined')
+         | selectattr('value.selected') | map(attribute='key')
+         | reject('equalto', '') | list }}
+
+- name: Report the alias plan
+  ansible.builtin.debug:
+    msg: >-
+      alias {{ firewall_private_alias }}:
+      {{ {'add': 'ADD ' ~ (_fw_alias_want | join(', ')),
+          'update': 'UPDATE ' ~ (_fw_alias_have | join(', ')) ~ ' -> ' ~ (_fw_alias_want | join(', ')),
+          'none': 'matches inventory (' ~ (_fw_alias_want | join(', ')) ~ ')'}[_fw_alias_action | trim] }}
+      {{ '' if firewall_apply | bool or _fw_alias_action | trim == 'none' else '- plan only' }}
+
+- name: Write the alias
+  ansible.builtin.uri:
+    url: >-
+      {{ opnsense_api_url }}/firewall/alias/{{ 'add_item' if _fw_alias_action | trim == 'add'
+         else 'set_item/' ~ _fw_alias_uuid }}
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      alias:
+        enabled: "1"
+        name: "{{ firewall_private_alias }}"
+        type: network
+        content: "{{ firewall_private_networks | join('\n') }}"
+        description: "{{ firewall_managed_prefix }} private address space - internet rules negate this (CHG-0023)"
+    return_content: true
+  register: _fw_alias_write
+  delegate_to: localhost
+  changed_when: true
+  when:
+    - firewall_apply | bool
+    - _fw_alias_action | trim != 'none'
+
+# Rejected writes are HTTP 200 with {"result":"failed"} on this build.
+- name: Fail if the router rejected the alias
+  ansible.builtin.fail:
+    msg: >-
+      The router did not save alias {{ firewall_private_alias }}:
+      {{ _fw_alias_write.json | default('no JSON body') }}
+  when:
+    - _fw_alias_write is not skipped
+    - _fw_alias_write.json is defined
+    - (_fw_alias_write.json | default({})).result | default('missing') != 'saved'
+
+- name: Load the alias into pf
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/firewall/alias/reconfigure"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+    return_content: true
+  register: _fw_alias_reconf
+  delegate_to: localhost
+  changed_when: true
+  failed_when: (_fw_alias_reconf.json | default({})).status | default('') | lower != 'ok'
+  when: _fw_alias_write is not skipped
