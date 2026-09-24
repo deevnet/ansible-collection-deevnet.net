@@ -31,15 +31,18 @@
 set -u
 
 # --- Hosts the profiles point at -------------------------------------------
-# Only always-on hosts. A BLOCK against a host that is switched off passes
-# whatever the policy says - a dead host times out too - and a REACH against
-# one fails. The IoT segment's Pis are often off, so iot is not a target here;
-# iot_backend (the broker host) stands in for the IoT side.
+# A BLOCK against a host that is switched off passes whatever the policy says -
+# a dead host times out too - and a REACH against one fails. The IoT Pis are
+# often off: their REACH failures from trusted mean "off" as often as "denied",
+# and their BLOCK passes are marked if-on, meaning they only prove something
+# while that Pi is running. The broker host (iot_backend) is always on and is
+# the dependable check on the IoT side.
 BUILDER=10.20.99.95        # dv00bld001p01, management
 ROUTER_MGMT=10.20.99.1     # dv02cor002p01 on management
 HYPERVISOR=10.20.99.21     # dv02hyp001p01, management
 PRV=10.20.25.20            # dv02prv001v01, platform: API :8080, tfstate :9000
 MSG=10.20.35.20            # dv02msg001v01, iot_backend: broker :8883
+PIS="10.20.30.11 10.20.30.12 10.20.30.13 10.20.30.14"   # dv02rpi001p01-004p01, iot
 WORKLOAD=10.20.130.10      # services.eds, tenant overlay
 EDGE=192.168.8.1           # dv02edg001p01 admin, upstream private space
 
@@ -65,9 +68,11 @@ reach $BUILDER 22 Builder-ssh(management,lab-exception)
 reach $ROUTER_MGMT 443 router-GUI(management)
 reach $HYPERVISOR 8006 hypervisor-PVE(management)
 https api.mobile.deevnet.net 8080
+http tfstate.mobile.deevnet.net 9000
 reach $PRV 22 prv-ssh(platform)
 tls mqtt.mobile.deevnet.net 8883
 reach $MSG 8883 broker(iot_backend)
+$(for h in $PIS; do echo "reach $h 22 pi(iot,fails-if-off)"; done)
 reach $WORKLOAD 22 tenant-workload(ADR-0018)
 reach $EDGE 80 edge-router-admin(exempt,CHG-0023)
 block 10.20.31.1 443 router-on-iot_vendor
@@ -95,6 +100,7 @@ block $PRV 8200 prv-other-port(platform)
 block $MSG 22 msg-ssh(iot_backend)
 block $MSG 1883 broker-plaintext(iot_backend)
 block $WORKLOAD 22 tenant-workload
+$(for h in $PIS; do echo "block $h 22 pi(iot,if-on)"; done)
 block $EDGE 80 edge-router-admin(CHG-0023)
 EOF
   ;;
@@ -122,6 +128,7 @@ block 10.20.31.1 443 router-GUI-on-own-gateway
 block $PRV 8080 deevnet-API(platform)
 block $MSG 8883 broker(iot_backend)
 block $WORKLOAD 22 tenant-workload
+$(for h in $PIS; do echo "block $h 22 pi(iot,if-on)"; done)
 block $EDGE 80 edge-router-admin(CHG-0023)
 EOF
   ;;
@@ -135,6 +142,7 @@ block 10.20.40.1 22 router-ssh-on-own-gateway
 block $PRV 8080 deevnet-API(platform)
 block $MSG 8883 broker(iot_backend)
 block $WORKLOAD 22 tenant-workload
+$(for h in $PIS; do echo "block $h 22 pi(iot,if-on)"; done)
 block 10.20.10.1 443 router-on-trusted
 block $EDGE 80 edge-router-admin(CHG-0023)
 EOF
@@ -235,7 +243,7 @@ while read -r kind a b c; do
     else ok "$a -> $ans"; fi ;;
   https)
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 --cacert "$CA" "https://$a:$b/")
-    case "$code" in [1-5][0-9][0-9]) ok "https://$a:$b answered HTTP $code (TLS verified)" ;;
+    case "$code" in [1-5][0-9][0-9]) ok "REACH provisioning API https://$a:$b - HTTP $code (TLS verified)" ;;
       *) bad "https://$a:$b no HTTP response" ;; esac ;;
   http)
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$a:$b/")
