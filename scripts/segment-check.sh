@@ -27,6 +27,8 @@
 #
 # History: CHG-0022 (tenant dev network) and CHG-0023 (internet means
 # internet) were verified with the tenant-dev profile of this script.
+# CHG-0024 (logs :8427, Grafana :3000) and CHG-0025 (downloads :8443) added
+# their tenant-dev checks.
 
 set -u
 
@@ -42,6 +44,7 @@ ROUTER_MGMT=10.20.99.1     # dv02cor002p01 on management
 HYPERVISOR=10.20.99.21     # dv02hyp001p01, management
 PRV=10.20.25.20            # dv02prv001v01, platform: API :8080, tfstate :9000
 MSG=10.20.35.20            # dv02msg001v01, iot_backend: broker :8883
+OBS=10.20.25.22            # dv02obs001v01, platform: logs :8427, Grafana :3000, downloads :8443
 PIS="10.20.30.11 10.20.30.12 10.20.30.13 10.20.30.14"   # dv02rpi001p01-004p01, iot
 WORKLOAD=10.20.130.10      # services.eds, tenant overlay
 EDGE=192.168.8.1           # dv02edg001p01 admin, upstream private space
@@ -85,10 +88,15 @@ subnet 10.20.45.
 resolve api.mobile.deevnet.net
 resolve tfstate.mobile.deevnet.net
 resolve mqtt.mobile.deevnet.net
+resolve downloads.mobile.deevnet.net
 https api.mobile.deevnet.net 8080
 http tfstate.mobile.deevnet.net 9000
 tls mqtt.mobile.deevnet.net 8883
+tls dv02obs001v01.mobile.deevnet.net 8427
+https dv02obs001v01.mobile.deevnet.net 3000
+https downloads.mobile.deevnet.net 8443
 internet
+block $OBS 22 obs-ssh(platform)
 block $BUILDER 22 Builder-ssh(management)
 block $ROUTER_MGMT 443 router-GUI(management)
 block $HYPERVISOR 8006 hypervisor-PVE(management)
@@ -243,7 +251,7 @@ while read -r kind a b c; do
     else ok "$a -> $ans"; fi ;;
   https)
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 --cacert "$CA" "https://$a:$b/")
-    case "$code" in [1-5][0-9][0-9]) ok "REACH provisioning API https://$a:$b - HTTP $code (TLS verified)" ;;
+    case "$code" in [1-5][0-9][0-9]) ok "REACH https://$a:$b - HTTP $code (TLS verified)" ;;
       *) bad "https://$a:$b no HTTP response" ;; esac ;;
   http)
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$a:$b/")
