@@ -122,6 +122,9 @@ block $ROUTER_MGMT 443 router-GUI(management)
 block 10.20.30.1 443 router-GUI-on-own-gateway
 block $PRV 8080 deevnet-API(platform)
 block $PRV 9000 tfstate(platform)
+block $OBS 8427 log-store(platform,CHG-0024)
+block $OBS 3000 grafana(platform,CHG-0024)
+block $OBS 8443 tenant-downloads(platform,CHG-0025)
 block $WORKLOAD 22 tenant-workload(ADR-0020)
 block 10.20.10.1 443 router-on-trusted
 block $EDGE 80 edge-router-admin(CHG-0023)
