@@ -95,12 +95,11 @@
     #   -e omada_apply=true -e '{"omada_recreate_ssids":["DVNTM-TD"]}'
     omada_recreate_ssids: []
 
-    # The EAP ACL protocol list that means "every protocol". The spec defers
-    # protocol values to the Open API Access Guide, which is not published with
-    # it, so the value is read back from the controller rather than assumed:
-    # CHG-0029 step 1. Required only when a segment declares
-    # wifi_client_isolation.
-    omada_acl_protocols_all: []
+    # omada_acl_protocols_all - the EAP ACL protocol list meaning "every
+    # protocol" - comes from INVENTORY (group_vars/network_controllers), never
+    # from here: play vars outrank group vars, so a default here silently hid
+    # the inventory value (CHG-0029). Read off the controller, not assumed; the
+    # spec defers protocol values to an access guide it does not publish.
 
     # The SSID settings CHG-0001's hand-configured SSIDs and the March migration
     # playbook used, kept so the controller-provisioned SSIDs behave the same.
@@ -725,7 +724,7 @@
 
         - name: Refuse isolation without the protocol value read off the controller
           ansible.builtin.assert:
-            that: omada_acl_protocols_all | length > 0
+            that: omada_acl_protocols_all | default([]) | length > 0
             fail_msg: >-
               {{ omada_isolated | map(attribute='value.wifi_ssid') | list }} declare wifi_client_isolation,
               but omada_acl_protocols_all is empty. Read it off the controller first (CHG-0029 step 1).
@@ -808,7 +807,7 @@
               {{ {'description': item.1.value.wifi_ssid ~ ' isolation: ' ~ item.0,
                   'status': 1,
                   'policy': 1 if item.0 == 'allow gateway' else 0,
-                  'protocols': omada_acl_protocols_all | map('int') | list,
+                  'protocols': omada_acl_protocols_all | default([]) | map('int') | list,
                   'sourceType': 4, 'sourceIds': [_ssid_id],
                   'destinationType': 1, 'destinationIds': [_group_id]} }}
             validate_certs: false
