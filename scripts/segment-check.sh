@@ -71,7 +71,7 @@ reach $BUILDER 22 Builder-ssh(management,lab-exception)
 reach $ROUTER_MGMT 443 router-GUI(management)
 reach $HYPERVISOR 8006 hypervisor-PVE(management)
 https api.mobile.deevnet.net 8080
-http tfstate.mobile.deevnet.net 9000
+https tfstate.mobile.deevnet.net 9000
 reach $PRV 22 prv-ssh(platform)
 tls mqtt.mobile.deevnet.net 8883
 reach $MSG 8883 broker(iot_backend)
@@ -90,7 +90,7 @@ resolve tfstate.mobile.deevnet.net
 resolve mqtt.mobile.deevnet.net
 resolve downloads.mobile.deevnet.net
 https api.mobile.deevnet.net 8080
-http tfstate.mobile.deevnet.net 9000
+https tfstate.mobile.deevnet.net 9000
 tls mqtt.mobile.deevnet.net 8883
 tls dv02obs001v01.mobile.deevnet.net 8427
 https dv02obs001v01.mobile.deevnet.net 3000
