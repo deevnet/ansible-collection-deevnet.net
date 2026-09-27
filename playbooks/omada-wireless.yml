@@ -7,9 +7,12 @@
 #             matched on VLAN id - so the networks created by hand-era tooling
 #             are recognised, whatever they are called
 #   profiles  one PPSK profile per segment that declares wifi_security: ppsk,
-#             matched on name. The profile is created EMPTY - the keys inside it
+#             matched on name. The profile is created holding only the API's
+#             placeholder key, never empty (CHG-0029) - the real keys inside it
 #             are tenant content written by the Deevnet API, not by inventory
 #             (ADR-0012 section 6). This play never reads or prints them.
+#   isolation two EAP ACLs per segment that declares wifi_client_isolation:
+#             allow its SSID to its gateway, then drop it to its own subnet.
 #   SSIDs     one per segment with a wifi_ssid, in the site's primary WLAN group,
 #             matched on name, tagged to the segment's network. A shared-key
 #             segment is keyed from deevnet_wifi_psk[<segment>]; a ppsk segment
@@ -83,6 +86,22 @@
     #   -e omada_apply=true -e omada_reconcile_psk=true
     omada_reconcile_psk: false
 
+    # SSIDs to delete and create again from inventory when they differ from it
+    # (CHG-0029). The play never rewrites an SSID in place, so a change of
+    # security model - DVNTM-TD from a shared key to PPSK - is a delete and a
+    # create. Every client on it drops. Only an SSID that is BOTH named here and
+    # reported as differing is touched.
+    #
+    #   -e omada_apply=true -e '{"omada_recreate_ssids":["DVNTM-TD"]}'
+    omada_recreate_ssids: []
+
+    # The EAP ACL protocol list that means "every protocol". The spec defers
+    # protocol values to the Open API Access Guide, which is not published with
+    # it, so the value is read back from the controller rather than assumed:
+    # CHG-0029 step 1. Required only when a segment declares
+    # wifi_client_isolation.
+    omada_acl_protocols_all: []
+
     # The SSID settings CHG-0001's hand-configured SSIDs and the March migration
     # playbook used, kept so the controller-provisioned SSIDs behave the same.
     omada_ssid_base:
@@ -108,6 +127,11 @@
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids/{ssidId}"}
       - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids/{ssidId}/update-basic-config"}
+      - {method: delete, path: "/openapi/v1/{omadacId}/sites/{siteId}/wireless-network/wlans/{wlanId}/ssids/{ssidId}"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/profiles/groups"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/profiles/groups"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/acls/eap-acls"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/acls/eap-acls"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices"}
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}/start-adopt"}
       - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/general-config"}
@@ -403,6 +427,42 @@
         - _live != _want
       no_log: true          # the comparison touches both keys
 
+    # --- Client isolation (CHG-0029) ----------------------------------------------
+    # A segment that declares wifi_client_isolation gets two EAP ACLs, matched on
+    # its SSID: allow its clients to their gateway, then drop them to the rest of
+    # their own subnet. Guest mode would isolate too, but it also blocks every
+    # private address, and a tenant developer's laptop exists to reach the API.
+    # Filtering is IP only: it stops a laptop reaching a laptop, not ARP
+    # spoofing, which is why every service on such a segment must be TLS.
+
+    - name: Read the IP groups and EAP ACLs
+      # omada-api: documented getGroupProfiles, getEapAclList spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_site }}/{{ item }}"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      loop:
+        - "profiles/groups"
+        - "acls/eap-acls?page=1&pageSize=100"
+      register: omada_acl_read
+      failed_when: omada_acl_read.json.errorCode | default(-1) != 0
+
+    - name: Derive the isolation groups and ACLs from inventory
+      vars:
+        _iso: "{{ omada_segments | selectattr('value.wifi_client_isolation', 'defined') | selectattr('value.wifi_client_isolation') | list }}"
+        _groups_have: "{{ omada_acl_read.results[0].json.result.data | default(omada_acl_read.results[0].json.result) | default([]) }}"
+        _acls_have: "{{ omada_acl_read.results[1].json.result.data | default([]) }}"
+      ansible.builtin.set_fact:
+        omada_isolated: "{{ _iso }}"
+        omada_groups_have: "{{ _groups_have }}"
+        omada_eap_acls: "{{ _acls_have }}"
+        omada_iso_groups_wanted: >-
+          {{ _iso | map(attribute='value.wifi_ssid') | map('regex_replace', '$', ' gateway') | list
+             + _iso | map(attribute='value.wifi_ssid') | map('regex_replace', '$', ' clients') | list }}
+        omada_iso_acls_wanted: >-
+          {{ _iso | map(attribute='value.wifi_ssid') | map('regex_replace', '$', ' isolation: allow gateway') | list
+             + _iso | map(attribute='value.wifi_ssid') | map('regex_replace', '$', ' isolation: drop clients') | list }}
+
     - name: Report
       ansible.builtin.debug:
         msg:
@@ -422,6 +482,14 @@
                if (omada_apply | bool and omada_reconcile_psk | bool)
                else 'no - omada_reconcile_psk is false, drift is reported only' }}
           ssids_not_in_inventory_left_in_place: "{{ omada_ssids_undeclared }}"
+          ssids_that_would_be_recreated: >-
+            {{ omada_recreate_ssids | select('in', omada_ssids_differ | default([]) | map('regex_replace', ' is VLAN.*$', '') | list) | list }}
+          isolated_ssids: "{{ omada_isolated | map(attribute='value.wifi_ssid') | list }}"
+          isolation_acls_to_create: "{{ omada_iso_acls_wanted | reject('in', omada_eap_acls | map(attribute='description') | list) | list }}"
+          # What the controller holds, protocols included - the CHG-0029 recon
+          # reads omada_acl_protocols_all off a rule made once in the UI.
+          eap_acls_on_controller: >-
+            {{ omada_eap_acls | map('dict2items') | map('selectattr', 'key', 'in', ['description', 'policy', 'protocols', 'sourceType', 'destinationType', 'index']) | map('items2dict') | list }}
           ap: >-
             {{ omada_ap.mac }}:
             {{ {0: 'disconnected', 1: 'connected', 2: 'pending', 3: 'heartbeat missed', 4: 'isolated'}[omada_ap_device.status]
@@ -476,43 +544,15 @@
         # it is refused, create with one random seed key and delete that key
         # immediately, which lands in the same place. The seed is never reported,
         # never reused, and does not outlive the play.
-        - name: Create the missing PPSK profiles, with no keys
-          # omada-api: documented createPPSKProfile spec 6.3.0.45
-          ansible.builtin.uri:
-            url: "{{ omada_site }}/ppsk-profile"
-            method: POST
-            headers: "{{ omada_hdr }}"
-            body_format: json
-            body:
-              profileName: "{{ item.value.wifi_ppsk_profile }}"
-              ppsk: []
-            validate_certs: false
-          loop: "{{ omada_ppsk_profiles_missing }}"
-          loop_control:
-            label: "{{ item.value.wifi_ppsk_profile }}"
-          register: omada_ppsk_empty
-          # Deliberately never fatal: a refusal here is an answer, not a failure.
-          # The verify at the end of the play is what decides whether this worked.
-          failed_when: false
-
-        - name: Note which empty profiles the controller refused
-          ansible.builtin.set_fact:
-            omada_ppsk_seed_needed: >-
-              {{ omada_ppsk_empty.results | default([])
-                 | rejectattr('json.errorCode', 'defined') | map(attribute='item') | list
-                 + omada_ppsk_empty.results | default([])
-                   | selectattr('json.errorCode', 'defined')
-                   | rejectattr('json.errorCode', 'equalto', 0) | map(attribute='item') | list }}
-
-        - name: Say so, once, when this controller will not take an empty profile
-          ansible.builtin.debug:
-            msg: >-
-              This controller refused a PPSK profile with an empty key list
-              ({{ omada_ppsk_seed_needed | map(attribute='value.wifi_ppsk_profile') | list }});
-              creating each with a single seed key and removing it. Worth recording in CHG-0013.
-          when: omada_ppsk_seed_needed | length > 0
-
-        - name: Create the refused profiles with one seed key
+        # A new profile is created holding the Deevnet API's placeholder key and
+        # keeps it; the API clears the placeholder when it issues the first real
+        # key. Never empty: an SSID bound to a profile that was empty when it was
+        # created does not authenticate the keys added afterwards, so the first
+        # tenant's key was dead on arrival (CHG-0013 phase 5). CHG-0005 proved
+        # the order that works - profile with a key, then the SSID - and
+        # CHG-0029 is the first fresh profile built this way. The name must stay
+        # the API's placeholderName, or the API will not recognize and clear it.
+        - name: Create the missing PPSK profiles, each holding the placeholder key
           # omada-api: documented createPPSKProfile spec 6.3.0.45
           vars:
             _seed: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) }}"
@@ -521,36 +561,19 @@
             method: POST
             headers: "{{ omada_hdr }}"
             body_format: json
-            body:
-              profileName: "{{ item.value.wifi_ppsk_profile }}"
-              ppsk:
-                - {name: "bootstrap", psk: "{{ _seed }}"}
+            # One expression, so vlan stays an integer: this collection does
+            # not run native Jinja, and per-key templating yields strings.
+            body: >-
+              {{ {'profileName': item.value.wifi_ppsk_profile,
+                  'ppsk': [{'name': 'DEEVNET-PLACEHOLDER-DO-NOT-USE', 'psk': _seed,
+                            'vlan': item.value.vlan_id | int}]} }}
             validate_certs: false
-          loop: "{{ omada_ppsk_seed_needed }}"
+          loop: "{{ omada_ppsk_profiles_missing }}"
           loop_control:
             label: "{{ item.value.wifi_ppsk_profile }}"
-          register: omada_ppsk_seeded
-          failed_when: omada_ppsk_seeded.json.errorCode | default(-1) != 0
+          register: omada_ppsk_created
+          failed_when: omada_ppsk_created.json.errorCode | default(-1) != 0
           no_log: true
-
-        - name: Remove the seed key, leaving the profile empty
-          # omada-api: documented deletePSKsToPPSKProfile spec 6.3.0.45
-          ansible.builtin.uri:
-            url: "{{ omada_site }}/ppsk-profile/{{ item.json.result.id }}/delete-psk"
-            method: POST
-            headers: "{{ omada_hdr }}"
-            body_format: json
-            body:
-              ppskNameList: ["bootstrap"]
-            validate_certs: false
-          loop: "{{ omada_ppsk_seeded.results | default([]) }}"
-          loop_control:
-            label: "{{ item.item.value.wifi_ppsk_profile | default('') }}"
-          when: not (item.skipped | default(false))
-          register: omada_ppsk_seed_removed
-          failed_when:
-            - not (omada_ppsk_seed_removed.skipped | default(false))
-            - omada_ppsk_seed_removed.json.errorCode | default(-1) != 0
 
         - name: Re-read the PPSK profiles, to resolve each segment's profile id
           # omada-api: documented getPPSKProfiles spec 6.3.0.45
@@ -568,8 +591,8 @@
                 | reject('in', omada_ppsk_now.json.result | default([]) | map(attribute='profileName') | list)
                 | list | length == 0
             fail_msg: >-
-              A PPSK profile is still missing after both the empty and the seeded attempt, so the
-              SSID that binds it cannot be created. Nothing further is written.
+              A PPSK profile is still missing after it was created, so the SSID that binds it
+              cannot be created. Nothing further is written.
             quiet: true
 
         # Every client on the SSID drops when this lands. Gated separately from
@@ -628,6 +651,34 @@
             - omada_reconcile_psk | bool
             - (omada_ssids_key_drift | default([]) | length) > 0
 
+        # CHG-0029: an SSID whose security model changed is deleted and then
+        # created like a missing one, bound to its (already seeded) profile.
+        - name: Delete the SSIDs named for recreation that differ from inventory
+          # omada-api: documented deleteSsid spec 6.3.0.45
+          vars:
+            _differ: "{{ omada_ssids_differ | default([]) | map('regex_replace', ' is VLAN.*$', '') | list }}"
+          ansible.builtin.uri:
+            url: >-
+              {{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids/{{ item.ssidId | default(item.id) }}
+            method: DELETE
+            headers: "{{ omada_hdr }}"
+            validate_certs: false
+          loop: >-
+            {{ omada_ssids_read.json.result.data | selectattr('name', 'in', omada_recreate_ssids)
+               | selectattr('name', 'in', _differ) | list }}
+          loop_control:
+            label: "{{ item.name }}"
+          register: omada_ssid_deleted
+          failed_when: omada_ssid_deleted.json.errorCode | default(-1) != 0
+          changed_when: true
+
+        - name: Treat the deleted SSIDs as missing
+          ansible.builtin.set_fact:
+            omada_ssids_missing: >-
+              {{ omada_ssids_missing + (omada_segments | selectattr('value.wifi_ssid', 'in',
+                   omada_ssid_deleted.results | default([]) | rejectattr('skipped', 'defined')
+                   | map(attribute='item.name') | list) | list) }}
+
         - name: Create the missing SSIDs, each tagged to its segment's network
           # omada-api: documented createSsid spec 6.3.0.45
           vars:
@@ -671,6 +722,106 @@
           register: omada_ssid_created
           failed_when: omada_ssid_created.json.errorCode | default(-1) != 0
           no_log: true
+
+        - name: Refuse isolation without the protocol value read off the controller
+          ansible.builtin.assert:
+            that: omada_acl_protocols_all | length > 0
+            fail_msg: >-
+              {{ omada_isolated | map(attribute='value.wifi_ssid') | list }} declare wifi_client_isolation,
+              but omada_acl_protocols_all is empty. Read it off the controller first (CHG-0029 step 1).
+            quiet: true
+          when: omada_isolated | length > 0
+
+        # Both rules or neither: the allow has to sit before the drop, and a
+        # half-built pair appended to would put them in the wrong order.
+        - name: Refuse a half-built isolation pair
+          vars:
+            _have: "{{ omada_eap_acls | map(attribute='description') | list }}"
+          ansible.builtin.assert:
+            that: >-
+              ((item.value.wifi_ssid ~ ' isolation: allow gateway') in _have)
+              == ((item.value.wifi_ssid ~ ' isolation: drop clients') in _have)
+            fail_msg: >-
+              {{ item.value.wifi_ssid }} has one of its two isolation ACLs and not the other. Delete the
+              one that exists in the controller and run again; nothing was written.
+            quiet: true
+          loop: "{{ omada_isolated }}"
+          loop_control:
+            label: "{{ item.value.wifi_ssid }}"
+
+        - name: Create the missing isolation IP groups
+          # omada-api: documented createGroupProfile spec 6.3.0.45
+          vars:
+            _gw: "{{ item.0.value.gateway }}"
+            _net: "{{ item.0.value.subnet }}"
+            _name: "{{ item.0.value.wifi_ssid }} {{ item.1 }}"
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/profiles/groups"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            # Plain split, not ansible.utils.ipaddr: inventory writes the subnet
+            # as its network address, and netaddr is not a control-node
+            # dependency this collection takes. One expression keeps mask an int.
+            body: >-
+              {{ {'name': _name, 'type': 0,
+                  'ipList': [{'ip': _gw if item.1 == 'gateway' else _net.split('/')[0],
+                              'mask': 32 if item.1 == 'gateway' else (_net.split('/')[1] | int)}]} }}
+            validate_certs: false
+          loop: "{{ omada_isolated | product(['gateway', 'clients']) | list }}"
+          loop_control:
+            label: "{{ item.0.value.wifi_ssid }} {{ item.1 }}"
+          when: (item.0.value.wifi_ssid ~ ' ' ~ item.1) not in (omada_groups_have | map(attribute='name') | list)
+          register: omada_group_created
+          failed_when:
+            - not (omada_group_created.skipped | default(false))
+            - omada_group_created.json.errorCode | default(-1) != 0
+
+        - name: Re-read the IP groups and the SSIDs, to resolve their ids
+          # omada-api: documented getGroupProfiles, getSsidList spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/{{ item }}"
+            headers: "{{ omada_hdr }}"
+            validate_certs: false
+          loop:
+            - "profiles/groups"
+            - "wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids?page=1&pageSize=100"
+          register: omada_acl_ids
+          failed_when: omada_acl_ids.json.errorCode | default(-1) != 0
+          when: omada_isolated | length > 0
+
+        # In this order - allow, then drop - so the allow is evaluated first.
+        - name: Create the missing isolation ACLs
+          # omada-api: documented createEapAcl spec 6.3.0.45
+          vars:
+            _groups: "{{ omada_acl_ids.results[0].json.result.data | default(omada_acl_ids.results[0].json.result) }}"
+            _ssids: "{{ omada_acl_ids.results[1].json.result.data }}"
+            _ssid_id: "{{ (_ssids | selectattr('name', 'equalto', item.1.value.wifi_ssid) | first).ssidId | default((_ssids | selectattr('name', 'equalto', item.1.value.wifi_ssid) | first).id) }}"
+            _group: "{{ item.1.value.wifi_ssid ~ (' gateway' if item.0 == 'allow gateway' else ' clients') }}"
+            _group_id: "{{ (_groups | selectattr('name', 'equalto', _group) | first).groupId }}"
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/acls/eap-acls"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body: >-
+              {{ {'description': item.1.value.wifi_ssid ~ ' isolation: ' ~ item.0,
+                  'status': 1,
+                  'policy': 1 if item.0 == 'allow gateway' else 0,
+                  'protocols': omada_acl_protocols_all | map('int') | list,
+                  'sourceType': 4, 'sourceIds': [_ssid_id],
+                  'destinationType': 1, 'destinationIds': [_group_id]} }}
+            validate_certs: false
+          loop: "{{ ['allow gateway', 'drop clients'] | product(omada_isolated) | list }}"
+          loop_control:
+            label: "{{ item.1.value.wifi_ssid }} isolation: {{ item.0 }}"
+          when: >-
+            (item.1.value.wifi_ssid ~ ' isolation: ' ~ item.0)
+            not in (omada_eap_acls | map(attribute='description') | list)
+          register: omada_acl_created
+          failed_when:
+            - not (omada_acl_created.skipped | default(false))
+            - omada_acl_created.json.errorCode | default(-1) != 0
 
         - name: Adopt the AP if it is pending
           when:
