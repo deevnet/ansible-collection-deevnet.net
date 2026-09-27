@@ -107,7 +107,7 @@ block $PRV 22 prv-ssh(platform)
 block $PRV 8200 prv-other-port(platform)
 block $MSG 22 msg-ssh(iot_backend)
 block $MSG 1883 broker-plaintext(iot_backend)
-block $WORKLOAD 22 tenant-workload
+reach $WORKLOAD 22 tenant-workload-ssh(ADR-0028)
 $(for h in $PIS; do echo "block $h 22 pi(iot,if-on)"; done)
 block $EDGE 80 edge-router-admin(CHG-0023)
 EOF
