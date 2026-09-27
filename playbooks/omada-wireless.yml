@@ -132,6 +132,7 @@
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/acls/eap-acls"}
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/acls/eap-acls"}
       - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices"}
+      - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}/force-provision"}
       - {method: post, path: "/openapi/v1/{omadacId}/sites/{siteId}/devices/{deviceMac}/start-adopt"}
       - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/general-config"}
       - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ip-setting"}
@@ -901,6 +902,32 @@
                 host: "{{ omada_ap.ip }}"
                 port: 443
                 timeout: 120
+
+        # The AP does not always apply what the controller holds. CHG-0029's
+        # isolation ACLs were on the controller, enabled and correct, and the
+        # AP still bridged client to client until it was force-provisioned;
+        # CHG-0013 saw the same with a PPSK change. So when this run created an
+        # SSID, a PPSK profile or an isolation rule, push it to the AP.
+        # Every client on the AP drops for a moment: a run that changed
+        # nothing never does this.
+        - name: Force-provision the AP when this run changed what it serves
+          # omada-api: documented forceProvisionDevice spec 6.3.0.45
+          vars:
+            _made: >-
+              {{ (omada_ssid_created.results | default([]) | rejectattr('skipped', 'defined') | list | length)
+                 + (omada_ppsk_created.results | default([]) | rejectattr('skipped', 'defined') | list | length)
+                 + (omada_acl_created.results | default([]) | rejectattr('skipped', 'defined') | list | length) }}
+          ansible.builtin.uri:
+            url: "{{ omada_site }}/devices/{{ omada_ap.mac }}/force-provision"
+            method: POST
+            headers: "{{ omada_hdr }}"
+            validate_certs: false
+          register: omada_ap_provisioned
+          failed_when: omada_ap_provisioned.json.errorCode | default(-1) != 0
+          changed_when: true
+          when:
+            - (_made | int) > 0
+            - omada_ap_device.status | default(-1) == 1
 
         - name: Verify every declared SSID is now on the controller
           # omada-api: documented getSsidList spec 6.3.0.45
