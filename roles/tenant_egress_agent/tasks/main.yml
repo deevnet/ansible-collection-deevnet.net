@@ -21,7 +21,7 @@
     mode: "0700"
   become: true
 
-- name: Place the site CA
+- name: Place the site root
   ansible.builtin.copy:
     src: "{{ tenant_egress_agent_ca_src }}"
     dest: "{{ tenant_egress_agent_ca_dest }}"
@@ -29,6 +29,13 @@
     group: root
     mode: "0644"
   when: tenant_egress_agent_ca_src | length > 0
+  become: true
+
+- name: Remove the CA under its old name
+  ansible.builtin.file:
+    path: /etc/deevnet/site-ca.pem
+    state: absent
+  when: tenant_egress_agent_ca_dest != '/etc/deevnet/site-ca.pem'
   become: true
 
 - name: Write the agent's environment
