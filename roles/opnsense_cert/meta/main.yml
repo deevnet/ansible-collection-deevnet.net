@@ -1,0 +1,7 @@
+---
+galaxy_info:
+  role_name: opnsense_cert
+  description: Import the site root, the bootstrap intermediate and a router certificate into OPNsense's trust store
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []

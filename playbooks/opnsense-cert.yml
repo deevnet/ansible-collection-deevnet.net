@@ -1,0 +1,14 @@
+---
+# The core router's web GUI and API certificate only (ADR-0030 §3, CHG-0032).
+#
+# Imports the site root, the bootstrap intermediate and a router certificate
+# over the Trust API, renews it in place when due, and checks what the GUI
+# serves. The first time, choosing the certificate in the GUI is manual: see the
+# Certificates runbook. deevnet.mgmt playbooks/certs.yml runs the same role.
+#
+#   ansible-playbook playbooks/opnsense-cert.yml
+- name: The core router's certificate
+  hosts: dns_servers
+  gather_facts: false
+  roles:
+    - opnsense_cert

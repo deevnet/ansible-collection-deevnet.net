@@ -5,7 +5,7 @@
 # from host_vars/<hv>/ - see the hypervisor host_vars in the Deevnet inventory.
 proxmox_api_port: 8006
 proxmox_api_url: "https://{{ ansible_host }}:{{ proxmox_api_port }}/api2/json"
-proxmox_validate_certs: false
+proxmox_validate_certs: "{{ site_verify_proxmox | default(false) }}"
 
 # Interface topology. Expected from host_vars/<hv>/vars.yml; see that file for
 # the shape. Empty here so the role fails its own assertion rather than doing

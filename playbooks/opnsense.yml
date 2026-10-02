@@ -7,6 +7,7 @@
 #   3. DNS (Unbound)
 #   4. DHCP (Kea)
 #   5. Gateways and static routes
+#   6. The web GUI and API certificate (ADR-0030 §3; runbook: Certificates)
 #
 # Secrets are vaulted in inventory (group_vars/routers/vault.yml).
 # Usage:
@@ -21,3 +22,5 @@
     - opnsense_dns
     - opnsense_dhcp
     - opnsense_routes
+    - role: opnsense_cert
+      tags: [certs]

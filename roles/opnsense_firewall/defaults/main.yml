@@ -3,7 +3,7 @@
 
 # OPNsense API settings (typically inherited from group_vars/routers.yml)
 opnsense_api_url: "https://{{ ansible_host }}/api"
-opnsense_validate_certs: false
+opnsense_validate_certs: "{{ site_verify_opnsense | default(false) }}"
 
 # Prefix for managed rule descriptions (used for idempotency)
 firewall_managed_prefix: "ansible:"
