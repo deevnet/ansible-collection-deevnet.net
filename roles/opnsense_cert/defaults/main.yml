@@ -1,0 +1,27 @@
+---
+# The core router's web GUI and API certificate (ADR-0030 §3, CHG-0032).
+#
+# Signed on the control node by the bootstrap intermediate (the router comes up
+# before OpenBao), and imported over the documented Trust API
+# (docs.opnsense.org/development/api/core/trust.html). OPNsense has NO API for
+# the web GUI's certificate choice: that is the one manual step, made once in
+# System > Settings > Administration > SSL Certificate (runbook: Certificates).
+opnsense_api_url: "https://{{ ansible_host }}/api"
+opnsense_validate_certs: "{{ site_verify_opnsense | default(false) }}"
+
+opnsense_cert_root_descr: "Deevnet {{ deevnet_substrate }} root CA"
+opnsense_cert_intermediate_descr: "Deevnet {{ deevnet_substrate }} bootstrap CA"
+opnsense_cert_descr: "Deevnet site certificate ({{ opnsense_cert_dns_names | first }})"
+
+# The inventory's names for the router, and every gateway address it holds:
+# clients dial it on whichever segment they sit (the Deevnet API on Platform).
+opnsense_cert_dns_names: "{{ site_cert_dns_names }}"
+opnsense_cert_ips: >-
+  {{ (site_cert_ip_sans
+      + (deevnet_vlans | dict2items | map(attribute='value') | map(attribute='gateway', default='') | select | list))
+     | unique | list }}
+# What the handshake check dials; the role reports when the GUI serves
+# something else.
+opnsense_cert_check_host: "{{ ansible_host }}"
+opnsense_cert_check_name: "{{ opnsense_cert_dns_names | first }}"
+opnsense_cert_renew_before: 5184000

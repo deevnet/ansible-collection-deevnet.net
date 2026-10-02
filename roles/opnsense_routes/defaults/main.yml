@@ -7,7 +7,7 @@
 
 # OPNsense API settings (typically inherited from group_vars/routers.yml)
 opnsense_api_url: "https://{{ ansible_host }}/api"
-opnsense_validate_certs: false
+opnsense_validate_certs: "{{ site_verify_opnsense | default(false) }}"
 
 # Gateways to ensure. A static route cannot name a bare address in OPNsense; it
 # references a gateway object, so any route to an internal next hop needs one.

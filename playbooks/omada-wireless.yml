@@ -145,7 +145,7 @@
       # Unauthenticated; the only source of omadacId before a token exists.
       ansible.builtin.uri:
         url: "{{ omada_url }}/api/info"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       register: omada_info
 
     - name: Note when the controller is not the version the markers were checked on
@@ -160,7 +160,7 @@
       # omada-api: documented springdoc /v3/api-docs spec 6.3.0.45
       ansible.builtin.uri:
         url: "{{ omada_url }}/v3/api-docs/00%20All"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
         timeout: 120
       register: omada_spec
 
@@ -278,7 +278,7 @@
           omadacId: "{{ omada_info.json.result.omadacId }}"
           client_id: "{{ vault_omada_openapi_client_id }}"
           client_secret: "{{ vault_omada_openapi_client_secret }}"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       register: omada_token
       failed_when: omada_token.json.errorCode | default(-1) != 0
       no_log: true
@@ -295,7 +295,7 @@
       ansible.builtin.uri:
         url: "{{ omada_api }}/sites?page=1&pageSize=100"
         headers: "{{ omada_hdr }}"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       register: omada_sites
       failed_when: omada_sites.json.errorCode != 0 or omada_sites.json.result.data | length != 1
 
@@ -308,7 +308,7 @@
       ansible.builtin.uri:
         url: "{{ omada_site }}/{{ item }}"
         headers: "{{ omada_hdr }}"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       loop:
         - "lan-networks?page=1&pageSize=100"
         - "wireless-network/wlans"
@@ -327,7 +327,7 @@
       ansible.builtin.uri:
         url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids?page=1&pageSize=100"
         headers: "{{ omada_hdr }}"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       register: omada_ssids_read
       failed_when: omada_ssids_read.json.errorCode != 0
 
@@ -342,7 +342,7 @@
       ansible.builtin.uri:
         url: "{{ omada_site }}/ppsk-profiles"
         headers: "{{ omada_hdr }}"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       register: omada_ppsk_read
       failed_when: omada_ppsk_read.json.errorCode != 0
 
@@ -400,7 +400,7 @@
       ansible.builtin.uri:
         url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids/{{ item.ssidId | default(item.id) }}"
         headers: "{{ omada_hdr }}"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       register: omada_ssid_details
       failed_when: omada_ssid_details.json.errorCode != 0
       loop: >-
@@ -440,7 +440,7 @@
       ansible.builtin.uri:
         url: "{{ omada_site }}/{{ item }}"
         headers: "{{ omada_hdr }}"
-        validate_certs: false
+        validate_certs: "{{ site_verify_omada | default(false) }}"
       loop:
         - "profiles/groups"
         - "acls/eap-acls?page=1&pageSize=100"
@@ -515,7 +515,7 @@
             headers: "{{ omada_hdr }}"
             body_format: json
             body: "{{ {'name': item.key, 'purpose': 0, 'vlan': item.value.vlan_id | int, 'igmpSnoopEnable': false} }}"
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop: "{{ omada_networks_missing }}"
           loop_control:
             label: "VLAN {{ item.value.vlan_id }} ({{ item.key }})"
@@ -527,7 +527,7 @@
           ansible.builtin.uri:
             url: "{{ omada_site }}/lan-networks?page=1&pageSize=100"
             headers: "{{ omada_hdr }}"
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           register: omada_networks_now
           failed_when: omada_networks_now.json.errorCode != 0
 
@@ -567,7 +567,7 @@
               {{ {'profileName': item.value.wifi_ppsk_profile,
                   'ppsk': [{'name': 'DEEVNET-PLACEHOLDER-DO-NOT-USE', 'psk': _seed,
                             'vlan': item.value.vlan_id | int}]} }}
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop: "{{ omada_ppsk_profiles_missing }}"
           loop_control:
             label: "{{ item.value.wifi_ppsk_profile }}"
@@ -580,7 +580,7 @@
           ansible.builtin.uri:
             url: "{{ omada_site }}/ppsk-profiles"
             headers: "{{ omada_hdr }}"
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           register: omada_ppsk_now
           failed_when: omada_ppsk_now.json.errorCode != 0
 
@@ -629,7 +629,7 @@
                    'vlanSetting': _cur.vlanSetting,
                    'pskSetting': (_cur.pskSetting | combine({'securityKey': deevnet_wifi_psk[_seg]}))
                  } }}
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop: >-
             {{ omada_ssid_details.results | default([]) | rejectattr('skipped', 'defined')
                | selectattr('json.result.name', 'in', omada_ssids_key_drift | default([])) | list }}
@@ -662,7 +662,7 @@
               {{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids/{{ item.ssidId | default(item.id) }}
             method: DELETE
             headers: "{{ omada_hdr }}"
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop: >-
             {{ omada_ssids_read.json.result.data | selectattr('name', 'in', omada_recreate_ssids)
                | selectattr('name', 'in', _differ) | list }}
@@ -715,7 +715,7 @@
                            if _ppsk | bool else
                            {'pskSetting': {'securityKey': deevnet_wifi_psk[item.key], 'versionPsk': 2,
                                            'encryptionPsk': 3, 'gikRekeyPskEnable': false}}) }}
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop: "{{ omada_ssids_missing }}"
           loop_control:
             label: "{{ item.value.wifi_ssid }} -> VLAN {{ item.value.vlan_id }}"
@@ -767,7 +767,7 @@
               {{ {'name': _name, 'type': 0,
                   'ipList': [{'ip': _gw if item.1 == 'gateway' else _net.split('/')[0],
                               'mask': 32 if item.1 == 'gateway' else (_net.split('/')[1] | int)}]} }}
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop: "{{ omada_isolated | product(['gateway', 'clients']) | list }}"
           loop_control:
             label: "{{ item.0.value.wifi_ssid }} {{ item.1 }}"
@@ -782,7 +782,7 @@
           ansible.builtin.uri:
             url: "{{ omada_site }}/{{ item }}"
             headers: "{{ omada_hdr }}"
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop:
             - "profiles/groups"
             - "wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids?page=1&pageSize=100"
@@ -811,7 +811,7 @@
                   'protocols': omada_acl_protocols_all | default([]) | map('int') | list,
                   'sourceType': 4, 'sourceIds': [_ssid_id],
                   'destinationType': 1, 'destinationIds': [_group_id]} }}
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           loop: "{{ ['allow gateway', 'drop clients'] | product(omada_isolated) | list }}"
           loop_control:
             label: "{{ item.1.value.wifi_ssid }} isolation: {{ item.0 }}"
@@ -838,7 +838,7 @@
                 body:
                   username: "{{ vault_wap_standalone_user }}"
                   password: "{{ vault_wap_standalone_password }}"
-                validate_certs: false
+                validate_certs: "{{ site_verify_omada | default(false) }}"
               register: omada_adopt_started
               failed_when: omada_adopt_started.json.errorCode | default(-1) != 0
               no_log: true
@@ -848,7 +848,7 @@
               ansible.builtin.uri:
                 url: "{{ omada_site }}/devices?page=1&pageSize=100"
                 headers: "{{ omada_hdr }}"
-                validate_certs: false
+                validate_certs: "{{ site_verify_omada | default(false) }}"
               register: omada_devices_now
               until: >-
                 (omada_devices_now.json.result.data | selectattr('mac', 'equalto', omada_ap.mac)
@@ -871,7 +871,7 @@
                 headers: "{{ omada_hdr }}"
                 body_format: json
                 body: {name: "{{ omada_ap.name }}"}
-                validate_certs: false
+                validate_certs: "{{ site_verify_omada | default(false) }}"
               register: omada_ap_named
               failed_when: omada_ap_named.json.errorCode | default(-1) != 0
 
@@ -893,7 +893,7 @@
                     configMask: "{{ omada_ap.netmask }}"
                     configGate: "{{ omada_ap.gateway }}"
                     preferredDNS: "{{ omada_ap.dns }}"
-                validate_certs: false
+                validate_certs: "{{ site_verify_omada | default(false) }}"
               register: omada_ap_ip
               failed_when: omada_ap_ip.json.errorCode | default(-1) != 0
 
@@ -921,7 +921,7 @@
             url: "{{ omada_site }}/devices/{{ omada_ap.mac }}/force-provision"
             method: POST
             headers: "{{ omada_hdr }}"
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           register: omada_ap_provisioned
           failed_when: omada_ap_provisioned.json.errorCode | default(-1) != 0
           changed_when: true
@@ -934,7 +934,7 @@
           ansible.builtin.uri:
             url: "{{ omada_site }}/wireless-network/wlans/{{ omada_wlan.wlanId | default(omada_wlan.id) }}/ssids?page=1&pageSize=100"
             headers: "{{ omada_hdr }}"
-            validate_certs: false
+            validate_certs: "{{ site_verify_omada | default(false) }}"
           register: omada_ssids_after
           failed_when: >-
             omada_ssids_after.json.errorCode != 0 or
