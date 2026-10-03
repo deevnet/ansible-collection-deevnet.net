@@ -31,7 +31,7 @@ the generated `frr.conf`) and reloads FRR.
 |---|---|
 | `tenant_egress_agent_api_url` | the API, e.g. `https://api.mobile.deevnet.net:8080` |
 | `tenant_egress_agent_token` | `vault_deevnet_egress_agent_token`, the API's `DEEVNET_AGENT_TOKEN` |
-| `tenant_egress_agent_ca_src` | the site CA on the control node, fetched by the `openbao` role |
+| `tenant_egress_agent_ca_src` | the Deevnet Root CA on the control node, from the inventory (`site_root_ca_file`) |
 | `tenant_egress_agent_gateway` | the transit gateway, from `deevnet_vlans` |
 
 ## After it runs

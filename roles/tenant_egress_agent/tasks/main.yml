@@ -21,9 +21,12 @@
     mode: "0700"
   become: true
 
-- name: Place the site root
+# During a re-root the file holds the outgoing root too
+# (site_root_ca_previous_files), so the agent reaches the API whichever chain it
+# serves.
+- name: Place the Deevnet Root CA
   ansible.builtin.copy:
-    src: "{{ tenant_egress_agent_ca_src }}"
+    content: "{{ query('file', *([tenant_egress_agent_ca_src] + (site_root_ca_previous_files | default([])))) | map('trim') | join('\n') ~ '\n' }}"
     dest: "{{ tenant_egress_agent_ca_dest }}"
     owner: root
     group: root
@@ -31,11 +34,14 @@
   when: tenant_egress_agent_ca_src | length > 0
   become: true
 
-- name: Remove the CA under its old name
+# The CA under its old names: site-ca.pem (before CHG-0031), and any root a
+# re-root retired (site_root_ca_retired, CHG-0033).
+- name: Remove the CA under its old names
   ansible.builtin.file:
-    path: /etc/deevnet/site-ca.pem
+    path: "/etc/deevnet/{{ item }}"
     state: absent
-  when: tenant_egress_agent_ca_dest != '/etc/deevnet/site-ca.pem'
+  loop: "{{ ['site-ca.pem'] + (site_root_ca_retired | default([])) }}"
+  when: ('/etc/deevnet/' ~ item) != tenant_egress_agent_ca_dest
   become: true
 
 - name: Write the agent's environment
