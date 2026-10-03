@@ -16,7 +16,7 @@ tenant_egress_agent_enabled: true
 # else; it is never an operator token.
 tenant_egress_agent_api_url: ""
 tenant_egress_agent_token: "{{ vault_deevnet_egress_agent_token | default('') }}"
-# The site root (ADR-0030), copied here by this role; the API serves a chain to it.
+# The Deevnet Root CA (ADR-0031), copied here by this role; the API serves a chain to it.
 tenant_egress_agent_ca_src: ""
 tenant_egress_agent_ca_dest: "/etc/deevnet/{{ site_root_ca_name | default('site-ca.pem') }}"
 

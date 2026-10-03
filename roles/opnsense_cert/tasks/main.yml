@@ -17,8 +17,8 @@
   register: _oc_cas
   delegate_to: localhost
 
-# The root first, so the intermediate links to it on import.
-- name: Import the site root and the bootstrap intermediate
+# The root first, so each CA links to its issuer on import.
+- name: Import the Deevnet Root CA, the Site CA and the Substrate CA
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/trust/ca/add"
     method: POST
@@ -32,9 +32,7 @@
         action: existing
         descr: "{{ item.descr }}"
         crt_payload: "{{ lookup('file', item.file) }}"
-  loop:
-    - { descr: "{{ opnsense_cert_root_descr }}", file: "{{ site_root_ca_file }}" }
-    - { descr: "{{ opnsense_cert_intermediate_descr }}", file: "{{ site_bootstrap_ca_file }}" }
+  loop: "{{ opnsense_cert_cas }}"
   loop_control:
     label: "{{ item.descr }}"
   when: item.descr not in (_oc_cas.json.rows | map(attribute='descr') | list)
@@ -42,6 +40,27 @@
   failed_when: _oc_ca_add.status != 200 or (_oc_ca_add.json | default({})).result | default('') != 'saved'
   changed_when: true
   delegate_to: localhost
+
+- name: Read the router's CAs again
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/trust/ca/search"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+  register: _oc_cas_now
+  delegate_to: localhost
+
+# The router's id for the Substrate CA: a certificate linked (caref) to any
+# other CA is from before a re-root or a rotation, and is reissued.
+- name: Find the Substrate CA on the router
+  ansible.builtin.set_fact:
+    _oc_issuer_refid: >-
+      {{ _oc_cas_now.json.rows | selectattr('descr', 'equalto', (opnsense_cert_cas | last).descr)
+         | map(attribute='refid') | first | default('') }}
 
 - name: Read the router's certificates
   ansible.builtin.uri:
@@ -60,22 +79,24 @@
   ansible.builtin.set_fact:
     _oc_site_cert: "{{ _oc_certs.json.rows | selectattr('descr', 'equalto', opnsense_cert_descr) | first | default({}) }}"
 
-# Due: fewer than renew_before seconds left. valid_to is a Unix time.
+# Due: fewer than renew_before seconds left (valid_to is a Unix time), or
+# signed by a CA other than today's Substrate CA.
 - name: Decide whether to issue
   ansible.builtin.set_fact:
     _oc_wanted: >-
       {{ _oc_site_cert | length == 0
-         or (_oc_site_cert.valid_to | int) - (now(utc=true).timestamp() | int) < (opnsense_cert_renew_before | int) }}
+         or (_oc_site_cert.valid_to | int) - (now(utc=true).timestamp() | int) < (opnsense_cert_renew_before | int)
+         or (_oc_site_cert.caref | default('')) != _oc_issuer_refid }}
 
 - name: Issue and import the router's certificate
   when: _oc_wanted | bool
   block:
     - name: Issue the certificate
       ansible.builtin.include_role:
-        name: deevnet.builder.site_bootstrap_cert
+        name: deevnet.builder.substrate_cert
       vars:
-        site_bootstrap_cert_dns_names: "{{ opnsense_cert_dns_names }}"
-        site_bootstrap_cert_ips: "{{ opnsense_cert_ips }}"
+        substrate_cert_dns_names: "{{ opnsense_cert_dns_names }}"
+        substrate_cert_ips: "{{ opnsense_cert_ips }}"
 
     # The leaf alone: the GUI appends the chain from the CA it links on import.
     - name: Import it
@@ -91,8 +112,8 @@
           cert:
             action: import
             descr: "{{ opnsense_cert_descr }}"
-            crt_payload: "{{ site_bootstrap_cert_result.certificate }}"
-            prv_payload: "{{ site_bootstrap_cert_result.private_key }}"
+            crt_payload: "{{ substrate_cert_result.certificate }}"
+            prv_payload: "{{ substrate_cert_result.private_key }}"
       register: _oc_cert_add
       failed_when: _oc_cert_add.status != 200 or (_oc_cert_add.json | default({})).result | default('') != 'saved'
       changed_when: true
@@ -100,9 +121,9 @@
       no_log: true
       when: _oc_site_cert | length == 0
 
-    # Renewal replaces the payload of the certificate the GUI already uses, so
-    # the GUI selection survives. Whether the Trust API accepts that is
-    # confirmed the first time a renewal runs; the read-back below proves it.
+    # Renewal, or a re-root, replaces the payload of the certificate the GUI
+    # already uses, so the GUI selection survives. The read-back below proves
+    # the router took it, linked to the Substrate CA.
     - name: Replace its payload in place
       ansible.builtin.uri:
         url: "{{ opnsense_api_url }}/trust/cert/set/{{ _oc_site_cert.uuid }}"
@@ -116,8 +137,8 @@
           cert:
             action: import
             descr: "{{ opnsense_cert_descr }}"
-            crt_payload: "{{ site_bootstrap_cert_result.certificate }}"
-            prv_payload: "{{ site_bootstrap_cert_result.private_key }}"
+            crt_payload: "{{ substrate_cert_result.certificate }}"
+            prv_payload: "{{ substrate_cert_result.private_key }}"
       register: _oc_cert_set
       failed_when: _oc_cert_set.status != 200 or (_oc_cert_set.json | default({})).result | default('') != 'saved'
       changed_when: true
@@ -138,17 +159,17 @@
       register: _oc_certs_after
       delegate_to: localhost
 
-    - name: Confirm the router holds the new certificate, linked to the intermediate
+    - name: Confirm the router holds the new certificate, linked to the Substrate CA
       vars:
         _row: "{{ _oc_certs_after.json.rows | selectattr('descr', 'equalto', opnsense_cert_descr) | first | default({}) }}"
       ansible.builtin.assert:
         that:
           - _row | length > 0
           - (_row.valid_to | int) - (now(utc=true).timestamp() | int) > (opnsense_cert_renew_before | int)
-          - _row.caref | default('') | length > 0
+          - _row.caref | default('') == _oc_issuer_refid
         fail_msg: >-
-          The router does not show {{ opnsense_cert_descr }} as a fresh certificate linked to a CA
-          after the import. Read it in System > Trust > Certificates.
+          The router does not show {{ opnsense_cert_descr }} as a fresh certificate linked to the
+          Substrate CA after the import. Read it in System > Trust > Certificates.
         quiet: true
 
 # What clients get. Until the operator has chosen the certificate in the GUI
@@ -172,3 +193,24 @@
       {{ 'The web GUI serves the site certificate.' if _oc_served.rc == 0 else
          'MANUAL STEP: in the router GUI, System > Settings > Administration > SSL Certificate, choose "'
          ~ opnsense_cert_descr ~ '" and Save (the GUI restarts). Then run this again.' }}
+
+# Only once the GUI serves the new certificate: a CA still referenced cannot
+# go, and the router refuses.
+- name: Delete retired CAs
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/trust/ca/del/{{ item.uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body: {}
+  loop: "{{ _oc_cas_now.json.rows | selectattr('descr', 'in', opnsense_cert_retired_cas) | list }}"
+  loop_control:
+    label: "{{ item.descr }}"
+  when: _oc_served.rc == 0
+  register: _oc_ca_del
+  failed_when: _oc_ca_del.status != 200 or (_oc_ca_del.json | default({})).result | default('') not in ['deleted', 'saved']
+  changed_when: true
+  delegate_to: localhost
