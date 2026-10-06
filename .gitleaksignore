@@ -1,0 +1,6 @@
+# Reviewed secret-scan findings (CHG-0035). One fingerprint per line:
+# commit:file:rule:line. Never a value.
+#
+# `KEY:SECRET` placeholders in a commented curl example, not credentials.
+41f912ea5cc446b60cec29ede59c45b35ed347c7:roles/opnsense_dns/tasks/configure_domain_overrides.yml:curl-auth-user:54
+e47148d7f0cc58ebcfff6ad7b959445bca2c952f:roles/opnsense_dns/tasks/configure_domain_overrides.yml:curl-auth-user:78
