@@ -9,6 +9,12 @@
 #      - If MAC does not exist: add via add_reservation
 #   4. For MACs marked for removal: delete via del_reservation
 #   5. Reconfigure DHCP service to apply changes
+#
+# This role is not the only writer. The Deevnet API keeps tenants' device
+# address reservations in the same table (ADR-0035), described
+# "Deevnet API - <tenant>/<device>". The description is what keeps the two
+# apart: this role writes, updates and deletes only rows that carry
+# dhcp_description_prefix, and stops rather than take over a row that does not.
 
 # Step 1: Get current Kea DHCP reservations
 - name: Get current DHCP reservations
@@ -53,6 +59,38 @@
   ansible.builtin.set_fact:
     existing_maps_by_mac: {}
   when: existing_maps_by_mac is not defined
+
+# Step 2b: A MAC inventory declares, already reserved by someone else.
+#
+# The lookup above is by MAC, so without this the update below would rewrite
+# that row - description included - and the prune would then count it as this
+# role's. For a tenant's device that means inventory silently taking an address
+# the tenant's own state believes it holds. Refusing is the only safe answer:
+# either the host does not belong in inventory, or the other reservation has to
+# go first, and which is a person's decision.
+- name: Find inventory MACs reserved under another owner's description
+  ansible.builtin.set_fact:
+    reservations_foreign: >-
+      {{
+        existing_maps_by_mac | dict2items
+        | rejectattr('value.description', 'search', '^' ~ (dhcp_description_prefix | regex_escape))
+        | selectattr('key', 'in',
+            (dhcp_reservations_to_add | map(attribute='mac') | map('upper') | list)
+            + (dhcp_macs_to_remove | default([])))
+        | list
+      }}
+
+- name: Refuse to take over another owner's reservation
+  ansible.builtin.assert:
+    that: reservations_foreign | length == 0 or (dhcp_adopt_foreign | bool)
+    fail_msg: >-
+      Inventory declares a host whose MAC is already reserved by something
+      other than this role:
+      {{ reservations_foreign | map(attribute='key') | zip(reservations_foreign | map(attribute='value.description')) | map('join', ' = ') | list }}.
+      A description starting "Deevnet API - " is a tenant's device address
+      (ADR-0035): the tenant gives it up, or the host leaves inventory. Any
+      other is hand-made: remove it in the router's UI, or re-run with
+      -e dhcp_adopt_foreign=true to have this role take it over.
 
 # Step 3: Categorize reservations into add/update
 - name: Categorize reservations for processing
@@ -213,6 +251,9 @@
     - dhcp_macs_to_remove is defined
     - dhcp_macs_to_remove | length > 0
     - item in existing_maps_by_mac
+    # Only this role's own rows, unless told to take another's over above.
+    - (existing_maps_by_mac[item].description is search('^' ~ (dhcp_description_prefix | regex_escape)))
+      or (dhcp_adopt_foreign | bool)
   register: delete_results
   delegate_to: localhost
   changed_when: true

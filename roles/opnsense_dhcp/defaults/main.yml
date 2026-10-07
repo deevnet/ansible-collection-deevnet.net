@@ -25,5 +25,17 @@ dhcp_description_prefix: "Ansible managed"
 # anything created by hand in the GUI is never a candidate.
 dhcp_delete_unmanaged: false
 
+# Other writers
+# ------------------------------------------------------------------------------
+# The Deevnet API keeps tenants' device address reservations in the same Kea
+# table (ADR-0035), and a reservation can also be made by hand in the GUI.
+# Neither carries dhcp_description_prefix. This role stops if inventory declares
+# a MAC that such a row already holds, rather than rewriting it into its own.
+#
+# Set true for one run to take such a row over deliberately: a hand-made
+# reservation for a host that has since been added to inventory. Never for a
+# "Deevnet API - " row; that address is in a tenant's state.
+dhcp_adopt_foreign: false
+
 # DHCP reservations will be built from inventory
 dhcp_reservations: []
