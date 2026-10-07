@@ -3,7 +3,7 @@
 #
 # For each VLAN with dhcp_range_start and dhcp_range_end defined,
 # creates a Kea DHCP subnet if one doesn't already exist for that
-# subnet CIDR.
+# subnet CIDR, and sets the pool of one that does when it differs.
 
 # Step 1: Get existing subnets
 - name: Get current Kea DHCP subnets
@@ -83,6 +83,127 @@
         | selectattr('changed', 'defined') | selectattr('changed') | list | length }},
       already existed: {{ subnet_results.results | default([])
         | selectattr('skipped', 'defined') | selectattr('skipped') | list | length }}
+
+# Step 3b: Bring an existing subnet's pool into line with inventory.
+#
+# Step 3 only creates. A subnet that already existed kept the pool it was made
+# with, so moving dhcp_range_start/end in deevnet_vlans never reached the
+# router. That mattered once the IoT segment's pool moved to make room for
+# tenants' device addresses below it (ADR-0035, CHG-0044): a pool left where
+# it was would lease addresses the Deevnet API reserves.
+#
+# Only `pools` is sent. The read-back below is what proves the write changed
+# that and nothing else: this build's set_subnet is expected to leave fields it
+# was not sent alone, and the assertion fails the run if it did not.
+- name: Read existing DHCP subnets that inventory gives a pool
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ _existing_subnet_map[item.value.subnet] }}"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  loop: "{{ deevnet_vlans | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.dhcp_range_start is defined
+    - item.value.dhcp_range_end is defined
+    - item.value.subnet is defined
+    - item.value.subnet in _existing_subnet_map
+  register: _subnet_details
+  delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
+
+- name: Work out which pools differ from inventory
+  ansible.builtin.set_fact:
+    _subnet_pools_to_set: >-
+      {{
+        _subnet_pools_to_set | default([]) + [{
+          'key': item.item.key,
+          'uuid': _existing_subnet_map[item.item.value.subnet],
+          'have': item.json.subnet4.pools | default(''),
+          'want': item.item.value.dhcp_range_start ~ ' - ' ~ item.item.value.dhcp_range_end,
+          'routers': item.json.subnet4.option_data.routers | default(''),
+          'subnet': item.json.subnet4.subnet | default('')
+        }]
+      }}
+  loop: "{{ _subnet_details.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when:
+    - item.json is defined
+    - item.json.subnet4 is defined
+    - (item.json.subnet4.pools | default('') | string | regex_replace('\\s', ''))
+      != (item.item.value.dhcp_range_start ~ '-' ~ item.item.value.dhcp_range_end)
+
+- name: Report pools that differ from inventory
+  ansible.builtin.debug:
+    msg: "{{ item.key }}: pool is '{{ item.have }}', inventory says '{{ item.want }}'"
+  loop: "{{ _subnet_pools_to_set | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: true
+
+- name: Set the pool of existing DHCP subnets
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/set_subnet/{{ item.uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      subnet4:
+        pools: "{{ item.want }}"
+    status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (_pool_results.json | default({})).result | default('') != 'saved'
+  loop: "{{ _subnet_pools_to_set | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}: {{ item.have }} -> {{ item.want }}"
+  register: _pool_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
+- name: Read back the subnets whose pool was set
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ item.uuid }}"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  loop: "{{ _subnet_pools_to_set | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: _subnet_after
+  delegate_to: localhost
+  when: not ansible_check_mode
+
+- name: Assert the pool changed and nothing else on the subnet did
+  ansible.builtin.assert:
+    that:
+      - (item.json.subnet4.pools | string | regex_replace('\\s', '')) == (item.item.want | regex_replace('\\s', ''))
+      - (item.json.subnet4.subnet | default('')) == item.item.subnet
+      - (item.json.subnet4.option_data.routers | default('')) == item.item.routers
+    fail_msg: >-
+      Setting the pool of {{ item.item.key }} left the subnet as
+      {{ item.json.subnet4 | default({}) }}. Expected the pool
+      '{{ item.item.want }}' with subnet '{{ item.item.subnet }}' and routers
+      '{{ item.item.routers }}' unchanged. Put it right in the router's UI
+      before running this again.
+  loop: "{{ _subnet_after.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.key | default('skipped') }}"
+  when:
+    - not ansible_check_mode
+    - item.json is defined
 
 # Step 4: Re-fetch subnets to get UUIDs for newly created ones
 - name: Get updated Kea DHCP subnets
