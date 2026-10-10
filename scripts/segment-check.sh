@@ -28,7 +28,8 @@
 # History: CHG-0022 (tenant dev network) and CHG-0023 (internet means
 # internet) were verified with the tenant-dev profile of this script.
 # CHG-0024 (logs :8427, Grafana :3000) and CHG-0025 (downloads :8443) added
-# their tenant-dev checks.
+# their tenant-dev checks. CHG-0046 put the same services on 443, by name,
+# behind a service proxy on each host; the old ports are checked until retired.
 
 set -u
 
@@ -42,9 +43,9 @@ set -u
 BUILDER=10.20.99.95        # dv00bld001p01, management
 ROUTER_MGMT=10.20.99.1     # dv02cor002p01 on management
 HYPERVISOR=10.20.99.21     # dv02hyp001p01, management
-PRV=10.20.25.20            # dv02prv001v01, platform: API :8080, tfstate :9000
+PRV=10.20.25.20            # dv02prv001v01, platform: API and tfstate on :443 (legacy :8080, :9000)
 MSG=10.20.35.20            # dv02msg001v01, iot_backend: broker :8883
-OBS=10.20.25.22            # dv02obs001v01, platform: logs :8427, Grafana :3000, downloads :8443
+OBS=10.20.25.22            # dv02obs001v01, platform: Grafana, logs, downloads on :443 (legacy :3000, :8427, :8443)
 PIS="10.20.30.11 10.20.30.12 10.20.30.13 10.20.30.14"   # dv02rpi001p01-004p01, iot
 WORKLOAD=10.20.130.10      # services.eds, tenant overlay
 EDGE=192.168.8.1           # dv02edg001p01 admin, upstream private space
@@ -70,6 +71,8 @@ internet
 reach $BUILDER 22 Builder-ssh(management,lab-exception)
 reach $ROUTER_MGMT 443 router-GUI(management)
 reach $HYPERVISOR 8006 hypervisor-PVE(management)
+https api.mobile.deevnet.net 443
+https tfstate.mobile.deevnet.net 443
 https api.mobile.deevnet.net 8080
 https tfstate.mobile.deevnet.net 9000
 reach $PRV 22 prv-ssh(platform)
@@ -89,6 +92,13 @@ resolve api.mobile.deevnet.net
 resolve tfstate.mobile.deevnet.net
 resolve mqtt.mobile.deevnet.net
 resolve downloads.mobile.deevnet.net
+resolve grafana.mobile.deevnet.net
+resolve logs.mobile.deevnet.net
+https api.mobile.deevnet.net 443
+https tfstate.mobile.deevnet.net 443
+https grafana.mobile.deevnet.net 443
+tls logs.mobile.deevnet.net 443
+https downloads.mobile.deevnet.net 443
 https api.mobile.deevnet.net 8080
 https tfstate.mobile.deevnet.net 9000
 tls mqtt.mobile.deevnet.net 8883
@@ -105,6 +115,7 @@ block 10.20.45.1 22 router-ssh-on-own-gateway
 block 10.20.10.1 443 router-on-trusted
 block $PRV 22 prv-ssh(platform)
 block $PRV 8200 prv-other-port(platform)
+block $PRV 9001 state-store-console(platform,CHG-0046)
 block $MSG 22 msg-ssh(iot_backend)
 block $MSG 1883 broker-plaintext(iot_backend)
 reach $WORKLOAD 22 tenant-workload-ssh(ADR-0028)
@@ -125,6 +136,8 @@ block $PRV 9000 tfstate(platform)
 block $OBS 8427 log-store(platform,CHG-0024)
 block $OBS 3000 grafana(platform,CHG-0024)
 block $OBS 8443 tenant-downloads(platform,CHG-0025)
+block $PRV 443 provisioning-https(platform,CHG-0046)
+block $OBS 443 observability-https(platform,CHG-0046)
 block $WORKLOAD 22 tenant-workload(ADR-0020)
 block 10.20.10.1 443 router-on-trusted
 block $EDGE 80 edge-router-admin(CHG-0023)
@@ -137,6 +150,8 @@ block $BUILDER 22 Builder-ssh(management)
 block $ROUTER_MGMT 443 router-GUI(management)
 block 10.20.31.1 443 router-GUI-on-own-gateway
 block $PRV 8080 deevnet-API(platform)
+block $PRV 443 provisioning-https(platform,CHG-0046)
+block $OBS 443 observability-https(platform,CHG-0046)
 block $MSG 8883 broker(iot_backend)
 block $WORKLOAD 22 tenant-workload
 $(for h in $PIS; do echo "block $h 22 pi(iot,if-on)"; done)
@@ -151,6 +166,8 @@ block $ROUTER_MGMT 443 router-GUI(management)
 block 10.20.40.1 443 router-GUI-on-own-gateway
 block 10.20.40.1 22 router-ssh-on-own-gateway
 block $PRV 8080 deevnet-API(platform)
+block $PRV 443 provisioning-https(platform,CHG-0046)
+block $OBS 443 observability-https(platform,CHG-0046)
 block $MSG 8883 broker(iot_backend)
 block $WORKLOAD 22 tenant-workload
 $(for h in $PIS; do echo "block $h 22 pi(iot,if-on)"; done)
@@ -177,19 +194,39 @@ fi
 SSID=$(echo "$1" | tr '[:lower:]' '[:upper:]')
 CHECKS=$(profile "$SSID") || usage
 
-# --- Site root (Deevnet mobile root CA, valid to 2046-10-02; ADR-0030) ------
+# --- Deevnet Root CA (valid to 2046-10-04; ADR-0031) -------------------------
 CA=$(mktemp); trap 'rm -f "$CA"' EXIT
 cat > "$CA" <<'PEM'
 -----BEGIN CERTIFICATE-----
-MIIBhTCCASygAwIBAgIUNgZVy/teb0xC3zvRp8BnXNlXNMQwCgYIKoZIzj0EAwIw
-ITEfMB0GA1UEAwwWRGVldm5ldCBtb2JpbGUgcm9vdCBDQTAeFw0yNjEwMDIxMDQ5
-MDlaFw00NjEwMDIxMDQ5MDlaMCExHzAdBgNVBAMMFkRlZXZuZXQgbW9iaWxlIHJv
-b3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQl8vL60eM2fOSajjy9iBvi
-ErCmQkO1DDy+TEtsvoWxZnRqC+kafTDqhiLIYte0OBWwa7sHYDsDVaGEnzE8Kg0d
-o0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQU
-2nWqSUsjgx+NksYzLr3w8j6alsowCgYIKoZIzj0EAwIDRwAwRAIgO116ad3N3ZzG
-xpHMTLlg+S18MzWcS240JFmgdwuVEOgCIFDwN+ipeq3Q7ohkEv5I7w1KMITwbNt1
-F/EqT75H7m5l
+MIIFUzCCAzugAwIBAgIQRsdIVg5XBHXG6FyTpxtZNTANBgkqhkiG9w0BAQsFADBC
+MRAwDgYDVQQKDAdEZWV2bmV0MRQwEgYDVQQLDAtEZWV2bmV0IFBLSTEYMBYGA1UE
+AwwPRGVldm5ldCBSb290IENBMB4XDTI2MTAwNDEwNDYyNVoXDTQ2MTAwNDEwNDYy
+NVowQjEQMA4GA1UECgwHRGVldm5ldDEUMBIGA1UECwwLRGVldm5ldCBQS0kxGDAW
+BgNVBAMMD0RlZXZuZXQgUm9vdCBDQTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCC
+AgoCggIBAIji/nhm9S3Uf9JwUgJR6u6qjgI2oKBeQKoqtWlL3Sc22naaTSWBrM2V
+BvSJ8TJfLJ25Z4OTlSRHBGKxBu9YQU3TPIEorxUMdRav1L+o2J3b/EMrS6MR0dNe
+n9ifEYlWNGccJ1UVdJ8RItXCB+PVtWrHit54UaqtRd6F4M6QsOd7zyoyoCRXmCHi
+n5Bt9ggu1fBLvy/x5tTIcMM14eK8Nm3G/K9/VJHtQFp6kGwSL4CjTTG89PV6RZFO
+agfacj1yQr14pPsMg8hCaTlipXiRY4pb5trAEia3DtvWfxOMZL9mfvbYhngceoc+
+bYY8r53zDZpFBDcFxmQgtYouvRjXr2wg5qD0iIlXYnfKkCzWMQt7gF6/goK54GUT
+aNrwk5PZ136RSLRpE5knfwCCB9DvS5sCqIT+dyLPIfxgh6vyD/4/ffgzNIpB5I7n
+dBx89W4U0yFRuNb6W842sIdI/LQ49VbL4OE3hql127BOwV74UIghIuOZ+DiIU7R2
+xSAmk2N/lfQKhRD7Aha7MZz4qeVQoWLTCam/7a0gf28sk4oXkBCiJ4w1ievsFNV7
+VO7BuCLzBKrHdVkwXuntOuYe7niN5fF4NrxAU3z7COBjAX3dR+n1zcsz1mqkymR0
+PFp8CoMfQLiiM3dhlXRYJAPNp04mAuG2lVPx2bl+tAXe3IEmU6SZAgMBAAGjRTBD
+MBIGA1UdEwEB/wQIMAYBAf8CAQIwDgYDVR0PAQH/BAQDAgEGMB0GA1UdDgQWBBTE
+BPg3Qx5ktLloUrHpDc+KLOmxtzANBgkqhkiG9w0BAQsFAAOCAgEAIe0XNeXOUcpQ
+9SgLjruq1lPb5aPtDi2K69kd5RCoJgqvr6YesCiBUCfbvsssViqyodCb1uQg119L
+FhEUwt3oj2vK+7eP7eUKdH8itYA69UuAk3djSFeFLWctnuK5NIeqkLpWwF/PHlS6
+W/JAbK/nwCFLilZVZQaXVbwy+NdUgpALo9CLa6k4boGsm9p1V92WlbUddqADC0nF
+wBXboYguz8teOOLS0GTAi7iuScniD3q83iP+72HxzWK9wl9p/SUdrgdK5Ur2mRzM
+Lo9iSSCA/WmEnXNhRRjwWugiMsRTKKEgbehhTp2T/IllxO82UJaOricf2rr/yQSe
+L7Hi3tlhfz5/p8EHRiXn+f6umNxOSBUWgNdqgMLii1vy8A3v+++nI7NmFvsnIzNN
+plIYVLSZvJtR6JwB/82945eky1cqrdVY/gmzf8ToJ+uvNVT8thZSApnC6IoVLg5G
+vEtl2pWIao0q0ls9qsr10K8RSgTWqa8Np53Hs3mK3/H2Al1CdH5U+CHDOmuuXcZp
+pJbFsspPYfE0qLHb75zvYJOmwwAjhxXcmL/dTEVcc91WnuL8IQW6vFU3rIcO5Zi5
++Oc4leUEthiqfcJmxkE8xvXhchVQjUP2F/cMejandgu94Vk8IMMsWTM/QifnL1K+
+NwUaqobwJXKkFzNpQTyAHoeZSWVPCi4=
 -----END CERTIFICATE-----
 PEM
 
