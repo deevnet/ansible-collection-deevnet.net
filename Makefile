@@ -1,4 +1,4 @@
-.PHONY: help default deps deps-force build install-dev install-user rebuild publish \
+.PHONY: help default deps deps-force build check install-dev install-user rebuild publish \
         dns dhcp switch opnsense proxmox-net wireless \
         preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
@@ -50,6 +50,9 @@ help:
 "" \
 "  build" \
 "      Build the local collection into a versioned .tar.gz artifact" \
+"" \
+"  check" \
+"      Syntax-check every playbook, with no inventory or vault (CI runs this)" \
 "" \
 "  install-dev" \
 "      Build and install the collection into ./.ansible/collections (this repo only)" \
@@ -133,6 +136,15 @@ deps-force:
 # ---------- Build ----------
 build:
 	ansible-galaxy collection build --force
+
+# ---------- Check ----------
+# Every playbook, parsed against localhost alone: no inventory, no vault.
+check:
+	@set -e; for p in $$(find playbooks -name '*.yml' | sort); do \
+	  echo "syntax-check $$p"; \
+	  ANSIBLE_HOST_PATTERN_MISMATCH=ignore ANSIBLE_LOCALHOST_WARNING=false \
+	    ansible-playbook -i localhost, --syntax-check "$$p" >/dev/null; \
+	done
 
 # ---------- Install lanes ----------
 install-dev: build
