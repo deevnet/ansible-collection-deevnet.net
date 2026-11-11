@@ -17,6 +17,17 @@
 
 # --- The SFTP target ------------------------------------------------------------
 
+# The controller does not always close its SFTP connection (it did not after a
+# refused upload), and a locked account keeps sessions it already has. They
+# also stop usermod from changing the account. End them first, and again last.
+- name: End any session the backup account still has
+  ansible.builtin.command:
+    argv: [loginctl, terminate-user, "{{ omada_backup_user }}"]
+  register: _omada_backup_term
+  changed_when: _omada_backup_term.rc == 0
+  failed_when: false
+  become: true
+
 - name: The backup account exists, locked, with no shell
   ansible.builtin.user:
     name: "{{ omada_backup_user }}"
@@ -270,6 +281,14 @@
       ansible.builtin.user:
         name: "{{ omada_backup_user }}"
         password_lock: true
+      become: true
+
+    - name: End the controller's session
+      ansible.builtin.command:
+        argv: [loginctl, terminate-user, "{{ omada_backup_user }}"]
+      register: _omada_backup_term
+      changed_when: _omada_backup_term.rc == 0
+      failed_when: false
       become: true
 
     - name: Leave nothing in the upload directory
