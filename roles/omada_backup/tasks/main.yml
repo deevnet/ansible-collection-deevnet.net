@@ -22,14 +22,14 @@
     name: "{{ omada_backup_user }}"
     system: true
     shell: /sbin/nologin
-    home: /upload
+    home: "{{ omada_backup_dir }}/upload"
     create_home: false
     password_lock: true
   become: true
 
-- name: The chroot is root's, as sshd requires
+- name: The backup directory is root's
   ansible.builtin.file:
-    path: "{{ omada_backup_chroot }}"
+    path: "{{ omada_backup_dir }}"
     state: directory
     owner: root
     group: root
@@ -38,7 +38,7 @@
 
 - name: The upload directory inside it is the account's alone
   ansible.builtin.file:
-    path: "{{ omada_backup_chroot }}/upload"
+    path: "{{ omada_backup_dir }}/upload"
     state: directory
     owner: "{{ omada_backup_user }}"
     group: "{{ omada_backup_user }}"
@@ -98,7 +98,7 @@
   block:
     - name: Clear anything an earlier run left
       ansible.builtin.shell: >-
-        find {{ omada_backup_chroot | quote }}/upload -mindepth 1 -delete
+        find {{ omada_backup_dir | quote }}/upload -mindepth 1 -delete
       changed_when: false
       become: true
 
@@ -158,7 +158,7 @@
             port: 22
             username: "{{ omada_backup_user }}"
             password: "{{ _omada_backup_pw }}"
-          filePath: /upload
+          filePath: "{{ omada_backup_dir }}/upload"
           retainUser: true
           retainAuthRecord: false
           retainFirmwareLog: false
@@ -178,17 +178,12 @@
           {{ _omada_backup_start.json.errorCode | default('none') }},
           "{{ _omada_backup_start.json.msg | default('') }}".
 
-    # "0: finished or init; 1: backup running" - so a 0 alone could be read
-    # before the backup started. Wait for the file first, then for the status.
-    - name: Wait for the backup file
-      ansible.builtin.find:
-        paths: "{{ omada_backup_chroot }}/upload"
-        file_type: file
-      register: _omada_backup_files
-      until: _omada_backup_files.matched | default(0) > 0
-      retries: "{{ (omada_backup_timeout | int / 5) | int }}"
-      delay: 5
-      become: true
+    # "0: finished or init; 1: backup running" - a 0 read too soon could be the
+    # state before the backup starts. The controller starts it within a second
+    # of accepting the request, so wait a moment, then for a 0 or an error.
+    - name: Give the controller a moment to start
+      ansible.builtin.pause:
+        seconds: 3
 
     - name: Wait for the controller to finish
       # omada-api: documented getBackupResult spec 6.3.0.45
@@ -202,11 +197,32 @@
         or _omada_backup_result.json.result.status | default(1) == 0
       retries: "{{ (omada_backup_timeout | int / 5) | int }}"
       delay: 5
-      failed_when: _omada_backup_result.json.errorCode | default(-1) != 0
+
+    # A failed upload still ends with status 0, so the file is the proof.
+    - name: Find the backup file
+      ansible.builtin.find:
+        paths: "{{ omada_backup_dir }}/upload"
+        file_type: file
+      register: _omada_backup_files
+      until: _omada_backup_files.matched | default(0) > 0
+      retries: 3
+      delay: 2
+      ignore_errors: true
+      become: true
+
+    - name: Fail with what the controller said
+      ansible.builtin.fail:
+        msg: >-
+          No backup file arrived. The controller's backup result: errorCode
+          {{ _omada_backup_result.json.errorCode | default('none') }},
+          "{{ _omada_backup_result.json.msg | default('') }}". Its side is in
+          /opt/omada-controller/logs/server.log ("Fail to upload file"), and the SFTP
+          side in `journalctl -u sshd` on this host.
+      when: _omada_backup_files.matched | default(0) == 0
 
     - name: Read the finished file
       ansible.builtin.find:
-        paths: "{{ omada_backup_chroot }}/upload"
+        paths: "{{ omada_backup_dir }}/upload"
         file_type: file
       register: _omada_backup_files
       become: true
@@ -217,7 +233,7 @@
           - _omada_backup_files.matched == 1
           - _omada_backup_files.files[0].size > 0
         fail_msg: >-
-          Expected one non-empty file in {{ omada_backup_chroot }}/upload, found
+          Expected one non-empty file in {{ omada_backup_dir }}/upload, found
           {{ _omada_backup_files.files | map(attribute='path') | list }}.
 
     - name: Make sure the staging directory exists
@@ -258,6 +274,6 @@
 
     - name: Leave nothing in the upload directory
       ansible.builtin.shell: >-
-        find {{ omada_backup_chroot | quote }}/upload -mindepth 1 -delete
+        find {{ omada_backup_dir | quote }}/upload -mindepth 1 -delete
       changed_when: false
       become: true
