@@ -1,0 +1,13 @@
+---
+opnsense_api_url: "https://{{ ansible_host }}/api"
+opnsense_validate_certs: "{{ site_verify_opnsense | default(false) }}"
+
+# Where the downloaded config.xml waits, in plaintext, until
+# scripts/vault-router-backup.py encrypts it into the inventory and deletes it.
+#
+# Outside every repository on purpose: the file holds the router's private keys,
+# pre-shared keys and password hashes, and a plaintext copy inside a checkout is
+# one `git add -A` away from a public repository. `make backup-router` and the
+# make targets that run opnsense_firewall seal whatever is here when the play
+# ends; a play run by hand leaves it for the next `make seal-router-backup`.
+opnsense_backup_stage_dir: "{{ lookup('env', 'HOME') }}/.cache/deevnet/router-backup"

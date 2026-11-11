@@ -1,5 +1,6 @@
 .PHONY: help default deps deps-force build check install-dev install-user rebuild publish \
         dns dhcp switch opnsense proxmox-net wireless \
+        backup-router seal-router-backup \
         preflight postcheck \
         migration-opnsense-vlans migration-switch-vlans migration-switch-trunk \
         migration-opnsense-assign migration-opnsense-temp-fw \
@@ -23,6 +24,16 @@ MIGRATION_TS      = $(shell date +%Y%m%d-%H%M%S)
 # staging directory it was promoted from no longer exists. Override only to point
 # at some other inventory.
 MIGRATION_INV     ?= ../ansible-inventory-deevnet/mobile
+
+# ---------- Router backup ----------
+# The opnsense_backup role stages each router's config.xml, in plaintext, here;
+# scripts/vault-router-backup.py seals it into the inventory repository under
+# backups/$(SITE)/<host>/config.xml.vault and deletes the plaintext.
+ROUTER_BACKUP_STAGE ?= $(HOME)/.cache/deevnet/router-backup
+INVENTORY_REPO      ?= ../ansible-inventory-deevnet
+SITE                ?= mobile
+SEAL_ROUTER_BACKUP   = python3 -I scripts/vault-router-backup.py \
+                         --stage "$(ROUTER_BACKUP_STAGE)" --inventory "$(INVENTORY_REPO)" --site "$(SITE)"
 
 # Extra ansible-playbook arguments, passed through by the migration targets that
 # support it. Used to turn on a role's apply switch for one run without putting
@@ -72,7 +83,15 @@ help:
 "  dhcp" \
 "      Configure OPNsense DHCP static reservations (decrypt inventory vault files first: cd ansible-inventory-deevnet && make unvault)" \
 "" \
-"      Configure VyOS routers (DNS, DHCP, firewall)" \
+"  opnsense" \
+"      Configure the OPNsense core router (full stack). Seals the pre-apply backup when it ends." \
+"" \
+"  backup-router" \
+"      Back up the core router's config.xml into the inventory, vault-encrypted (asks for the" \
+"      vault password once). Commit the file it names through a pull request." \
+"" \
+"  seal-router-backup" \
+"      Encrypt a router backup left staged by an interrupted run, and delete the plaintext" \
 "" \
 "  switch" \
 "      Configure switch VLANs over the CLI - standalone switches only; break-glass once a switch" \
@@ -179,9 +198,21 @@ proxmox-net: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/proxmox-node-network.yml $(if $(TAGS),--tags $(TAGS),--tags interfaces)
 
+# The firewall role stages a backup before it applies; it is sealed whether or
+# not the play succeeded, and the play's exit status is kept.
 opnsense: deps install-dev
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
-	  ansible-playbook playbooks/opnsense.yml
+	  ansible-playbook playbooks/opnsense.yml -e opnsense_backup_stage_dir="$(ROUTER_BACKUP_STAGE)"; rc=$$?; \
+	  $(SEAL_ROUTER_BACKUP) || rc=$$((rc ? rc : 1)); exit $$rc
+
+# ---------- Router backup ----------
+backup-router: deps install-dev
+	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
+	  ansible-playbook playbooks/opnsense-backup.yml -e opnsense_backup_stage_dir="$(ROUTER_BACKUP_STAGE)"
+	@$(SEAL_ROUTER_BACKUP)
+
+seal-router-backup:
+	@$(SEAL_ROUTER_BACKUP)
 
 # Holding a segment out of a run (omada_segment_skip) stays a raw ansible-playbook
 # invocation - see the playbook header. It is exceptional, and its JSON quoting
@@ -313,14 +344,16 @@ migration-opnsense-interfaces: deps install-dev
 #   ... EXTRA_ARGS="-e firewall_apply=true -e firewall_delete_unmanaged=true"
 # Deletion is never set in inventory. pipefail is set because the log is piped
 # through tee, which would otherwise mask a failed play as a successful make.
+# An apply stages a pre-apply backup; it is sealed after the play, pass or fail.
 migration-opnsense-firewall: SHELL := /bin/bash
 migration-opnsense-firewall: .SHELLFLAGS := -o pipefail -c
 migration-opnsense-firewall: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
 	@ANSIBLE_COLLECTIONS_PATH="$(PROJECT_COLLECTIONS_PATH):$(USER_COLLECTIONS_PATH)" \
 	  ansible-playbook playbooks/migration/07-opnsense-firewall.yml \
-	  -i "$(MIGRATION_INV)" $(EXTRA_ARGS) 2>&1 \
-	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-firewall.log"
+	  -i "$(MIGRATION_INV)" -e opnsense_backup_stage_dir="$(ROUTER_BACKUP_STAGE)" $(EXTRA_ARGS) 2>&1 \
+	  | tee "$(MIGRATION_LOG_DIR)/$(MIGRATION_TS)-migration-opnsense-firewall.log"; rc=$$?; \
+	  $(SEAL_ROUTER_BACKUP) || rc=$$((rc ? rc : 1)); exit $$rc
 
 migration-switch-access-ports: deps install-dev
 	@mkdir -p "$(MIGRATION_LOG_DIR)"
