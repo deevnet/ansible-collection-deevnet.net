@@ -6,15 +6,14 @@
 # handler fires, the newest revision already contains the change we might want
 # to undo. What is recorded here is the last revision from before this run.
 #
-# Two things are taken:
-#   1. The newest revision id, e.g. config-1789702628.4244.xml. This is what
-#      core/backup/revertBackup takes, and what to pick at the console under
-#      "Restore a backup" if the network route is gone.
-#   2. The running configuration itself, downloaded to the control host by the
-#      opnsense_backup role, the same one `make backup-router` runs. A
-#      configuration that exists only on the router is no use when the router
-#      is what you cannot reach. The make targets that run this role seal it
-#      into the inventory, vault-encrypted, when the play ends.
+# What is taken is the newest revision id, e.g. config-1789702628.4244.xml.
+# This is what core/backup/revertBackup takes, and what to pick at the console
+# under "Restore a backup" if the network route is gone.
+#
+# The off-box copy is not taken here. Every playbook that writes to the router
+# ends with the opnsense_backup role, so the copy kept in the inventory is the
+# configuration as the run left it - the one a rebuild wants - while rollback
+# uses the router's own history, which this revision id points into.
 #
 # Skipped entirely on a plan run - nothing is being written, so there is
 # nothing to roll back to.
@@ -54,13 +53,8 @@
       Rollback target: {{ _fw_pre_revision }} ({{ _fw_pre_revision_iso }}).
   when: firewall_rollback_on_failure | bool
 
-- name: Back up the running configuration
-  ansible.builtin.include_role:
-    name: opnsense_backup
-
 - name: Report the snapshot
   ansible.builtin.debug:
     msg: >-
       Pre-apply snapshot taken. Revision to roll back to: {{ _fw_pre_revision }}
-      ({{ _fw_pre_revision_iso }}). Configuration staged at
-      {{ _opnsense_backup_download.path | default(_opnsense_backup_download.dest | default('(not written)', true), true) }}.
+      ({{ _fw_pre_revision_iso }}).

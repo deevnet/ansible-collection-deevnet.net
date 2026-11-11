@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Seal staged router backups into the inventory, vault-encrypted.
+"""Seal staged device backups into the inventory, vault-encrypted.
 
-The opnsense_backup role leaves each router's config.xml, in plaintext, at
-<stage>/<inventory_hostname>.xml. For each one this script:
+The backup roles leave each device's backup, in plaintext, in the staging
+directory, named after its inventory host:
+
+  <host>.xml   opnsense_backup: the router's config.xml
+  <host>.cfg   omada_backup: the Omada controller's settings backup
+
+For each one this script:
 
   1. encrypts it with the inventory's vault password, to
-     <inventory>/backups/<site>/<inventory_hostname>/config.xml.vault, and
+     <inventory>/backups/<site>/<host>/<name>.vault, and
   2. deletes the plaintext once the ciphertext is written and decrypts back to
      the same bytes.
 
@@ -14,10 +19,14 @@ on the inventory's origin/main before anything is encrypted: a mistyped
 password would otherwise produce a backup nobody can open, found out only on
 the day it is needed. The check decrypts in memory and prints nothing of it.
 
-Nothing is committed. Inventory changes go through a pull request, so the
-script ends by printing the path to add.
+Vault encryption is salted, so the same plaintext never encrypts to the same
+file. A backup whose plaintext matches the one already in the inventory is
+therefore not rewritten: a run that changed nothing leaves nothing to commit.
 
-Usage: vault-router-backup.py --stage DIR --inventory DIR --site SITE
+Nothing is committed. Inventory changes go through a pull request, so the
+script ends by printing the paths to add.
+
+Usage: seal-backups.py --stage DIR --inventory DIR --site SITE
 """
 
 import argparse
@@ -29,6 +38,12 @@ from pathlib import Path
 
 from ansible.errors import AnsibleError
 from ansible.parsing.vault import VaultLib, VaultSecret
+
+# Staged suffix -> (file name in the inventory, check the plaintext must pass, what it is)
+KINDS = {
+    ".xml": ("config.xml.vault", lambda b: b"<opnsense>" in b, "an OPNsense configuration"),
+    ".cfg": ("omada-backup.cfg.vault", lambda b: len(b) > 0, "a non-empty Omada backup"),
+}
 
 
 def committed_vault_file(inventory: Path) -> tuple[str, bytes]:
@@ -55,12 +70,12 @@ def main() -> int:
     parser.add_argument("--site", required=True)
     args = parser.parse_args()
 
-    staged = sorted(args.stage.glob("*.xml")) if args.stage.is_dir() else []
+    staged = sorted(p for p in args.stage.glob("*") if p.suffix in KINDS) if args.stage.is_dir() else []
     if not staged:
-        print(f"Nothing staged in {args.stage}; no router backup to seal.")
+        print(f"Nothing staged in {args.stage}; no backup to seal.")
         return 0
 
-    print("Staged router backups: " + ", ".join(p.stem for p in staged))
+    print("Staged backups: " + ", ".join(p.name for p in staged))
     check_name, check_blob = committed_vault_file(args.inventory)
     password = getpass.getpass("Inventory vault password: ").encode()
     vault = VaultLib([("default", VaultSecret(password))])
@@ -69,29 +84,41 @@ def main() -> int:
     except AnsibleError:
         print(
             f"That password does not open origin/main:{check_name}. Nothing was encrypted; "
-            f"the plaintext stays in {args.stage} - run `make seal-router-backup` to try again.",
+            f"the plaintext stays in {args.stage} - run `make seal-backups` to try again.",
             file=sys.stderr,
         )
         return 1
 
-    written = []
+    written, failed = [], 0
     for src in staged:
+        dest_name, valid, what = KINDS[src.suffix]
         plaintext = src.read_bytes()
-        if b"<opnsense>" not in plaintext:
-            print(f"{src} is not an OPNsense configuration; left in place, not sealed.", file=sys.stderr)
+        if not valid(plaintext):
+            print(f"{src} is not {what}; left in place, not sealed.", file=sys.stderr)
+            failed += 1
             continue
+        dest = args.inventory / "backups" / args.site / src.stem / dest_name
+        if dest.exists():
+            try:
+                unchanged = vault.decrypt(dest.read_bytes()) == plaintext
+            except AnsibleError:
+                unchanged = False
+            if unchanged:
+                src.unlink()
+                print(f"{src.stem}: unchanged since {dest}; nothing to commit.")
+                continue
         ciphertext = vault.encrypt(plaintext)
         if vault.decrypt(ciphertext) != plaintext:
             print(f"{src} did not decrypt back to itself; left in place, not sealed.", file=sys.stderr)
+            failed += 1
             continue
-        dest = args.inventory / "backups" / args.site / src.stem / "config.xml.vault"
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(".vault.tmp")
+        tmp = dest.with_name(dest.name + ".tmp")
         tmp.write_bytes(ciphertext)
         os.replace(tmp, dest)
         src.unlink()
         written.append(dest)
-        print(f"Sealed {src.stem} -> {dest}")
+        print(f"Sealed {src.name} -> {dest}")
 
     if written:
         rel = " ".join(str(p.relative_to(args.inventory)) for p in written)
@@ -99,7 +126,7 @@ def main() -> int:
             "\nCommit it through a pull request, on a branch from main:\n"
             f"  cd {args.inventory} && git add {rel}"
         )
-    return 0 if len(written) == len(staged) else 1
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

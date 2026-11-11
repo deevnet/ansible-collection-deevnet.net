@@ -18,3 +18,8 @@
   gather_facts: false
   roles:
     - opnsense_firewall
+    # After an apply only: a plan run writes nothing. The copy is sealed into
+    # the inventory by the make target (make seal-backups after a raw run).
+    - role: opnsense_backup
+      when: firewall_apply | default(false) | bool
+      tags: [always]

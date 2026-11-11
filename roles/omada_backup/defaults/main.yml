@@ -1,0 +1,26 @@
+---
+# Runs on the controller's host (group network_controllers), like
+# playbooks/omada-wireless.yml: the API is reached on localhost.
+omada_url: "https://localhost:8043"
+
+# The controller's Open API can only send a backup to a file server (ADR-0009:
+# documented calls only; there is no download call). It sends it over SFTP to
+# this account on its own host. The account exists for nothing else: no shell,
+# chrooted to omada_backup_chroot, password logins allowed for it only from the
+# host itself, and locked except while a backup runs. Each run sets a new random
+# password, which is never stored.
+omada_backup_user: omada-backup
+omada_backup_chroot: /var/lib/omada-backup
+
+# Days of client and statistics data kept in the backup. The controller's
+# backup call takes 0 (no limit) or 7, 30, 60, 90, 180, 365; 7 is the least
+# data it will back up. Settings are always included.
+omada_backup_retention: 7
+
+# How long to wait for the controller to finish writing the backup.
+omada_backup_timeout: 300
+
+# Where the file waits, in plaintext, on the control host until
+# scripts/seal-backups.py encrypts it into the inventory. The same directory
+# opnsense_backup uses, outside every repository.
+omada_backup_stage_dir: "{{ lookup('env', 'HOME') }}/.cache/deevnet/backup-stage"

@@ -1,0 +1,17 @@
+---
+# Back up the Omada controller's settings.
+#
+# The controller sends its backup over SFTP to a locked account on its own host;
+# the omada_backup role fetches it to a private staging directory on the control
+# host. It is still plaintext there: `make backup-wireless` runs this and then
+# scripts/seal-backups.py, which encrypts it with the inventory's vault password
+# into ansible-inventory-deevnet/backups/<site>/<host>/ and deletes the
+# plaintext. Run it through make.
+#
+# playbooks/omada-wireless.yml ends with the same role after an apply.
+
+- name: Back up the Omada controller
+  hosts: network_controllers
+  gather_facts: false
+  roles:
+    - omada_backup

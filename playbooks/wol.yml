@@ -13,3 +13,7 @@
   gather_facts: false
   roles:
     - opnsense_wol
+    # Last: the configuration as this run left it, staged for the make target
+    # to seal into the inventory (make seal-backups after a raw run).
+    - role: opnsense_backup
+      tags: [always]

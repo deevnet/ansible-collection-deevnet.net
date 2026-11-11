@@ -87,17 +87,16 @@ firewall_protected_descriptions:
 #
 # What is real is the router's own configuration history in /conf/backup,
 # reachable over the API. Before the apply this role records the newest
-# revision id and backs up the running config to the control host. If the
+# revision id. If the
 # apply severs a required path and the router is still reachable, it reverts to
 # that revision. If the router is NOT reachable the revert cannot be sent from
 # here either, and the play fails naming the exact revision to restore at the
 # console - which is the honest position, not a promise the API cannot keep.
 firewall_rollback_on_failure: true
 
-# The pre-apply configuration download is the opnsense_backup role's: it stages
-# config.xml in opnsense_backup_stage_dir, and the make targets seal it into the
-# inventory, vault-encrypted. (This replaced firewall_config_backup_dir, which
-# left plaintext copies in migration-logs/.)
+# The off-box copy of the configuration is not this role's. Every playbook that
+# writes to the router ends with the opnsense_backup role, and the make targets
+# seal what it stages into the inventory, vault-encrypted.
 
 # --- Verify ------------------------------------------------------------------
 # After applying, prove from the control host that the paths which matter still
