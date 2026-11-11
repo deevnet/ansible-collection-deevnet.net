@@ -24,3 +24,7 @@
     - opnsense_routes
     - role: opnsense_cert
       tags: [certs]
+    # Last: the configuration as this run left it, staged for the make target
+    # to seal into the inventory (make seal-backups after a raw run).
+    - role: opnsense_backup
+      tags: [always]

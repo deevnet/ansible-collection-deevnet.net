@@ -48,4 +48,4 @@
     msg: >-
       Configuration of {{ inventory_hostname }} staged at
       {{ opnsense_backup_stage_dir }}/{{ inventory_hostname }}.xml, in
-      plaintext. Seal it into the inventory with `make seal-router-backup`.
+      plaintext. Seal it into the inventory with `make seal-backups`.

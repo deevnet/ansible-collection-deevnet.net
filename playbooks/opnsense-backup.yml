@@ -3,7 +3,7 @@
 #
 # Downloads the running configuration to a private staging directory on the
 # control host. It is still plaintext there: `make backup-router` runs this and
-# then scripts/vault-router-backup.py, which encrypts it with the inventory's
+# then scripts/seal-backups.py, which encrypts it with the inventory's
 # vault password into ansible-inventory-deevnet/backups/<site>/<host>/ and
 # deletes the plaintext. Run it through make.
 #

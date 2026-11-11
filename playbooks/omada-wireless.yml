@@ -940,3 +940,17 @@
             omada_ssids_after.json.errorCode != 0 or
             (omada_segments | map(attribute='value.wifi_ssid')
              | reject('in', omada_ssids_after.json.result.data | map(attribute='name') | list) | list | length) > 0
+
+# After an apply only: a plan run writes nothing. The controller's settings as
+# this run left them, staged for the make target to seal into the inventory
+# (make seal-backups after a raw run). A separate play, so it runs only when
+# the one above succeeded.
+- name: Back up the controller after an apply
+  hosts: network_controllers
+  gather_facts: false
+  tasks:
+    - name: Back up the controller
+      ansible.builtin.include_role:
+        name: omada_backup
+      when: omada_apply | default(false) | bool
+      tags: [always]

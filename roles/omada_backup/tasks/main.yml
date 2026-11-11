@@ -1,0 +1,321 @@
+---
+# Back up the Omada controller's settings and stage the file on the control host.
+#
+# The controller's Open API backs up only to a file server
+# (POST /maintenance/backup/file-server, "Backup controller config to file
+# server"); it has no download call. So the controller sends the backup over
+# SFTP to a dedicated, locked account on its own host, and this role fetches
+# the file from there. Everything stays on the management segment; nothing
+# crosses the core router (INC-0005).
+#
+# Needs, in group_vars/network_controllers/vault.yml, the same Open API client
+# as playbooks/omada-wireless.yml: vault_omada_openapi_client_id / _secret.
+# The client needs "Global Other Setting Modify", which the backup call
+# requires.
+#
+# API markers (ADR-0009). On a controller upgrade:  grep -rn "omada-api:"
+
+# --- The SFTP target ------------------------------------------------------------
+
+# The controller does not always close its SFTP connection (it did not after a
+# refused upload), and a locked account keeps sessions it already has. They
+# also stop usermod from changing the account. End them first, and again last.
+- name: End any session the backup account still has
+  ansible.builtin.command:
+    argv: [loginctl, terminate-user, "{{ omada_backup_user }}"]
+  register: _omada_backup_term
+  changed_when: _omada_backup_term.rc == 0
+  failed_when: false
+  become: true
+
+- name: The backup account exists, locked, with no shell
+  ansible.builtin.user:
+    name: "{{ omada_backup_user }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ omada_backup_dir }}/upload"
+    create_home: false
+    password_lock: true
+  become: true
+
+- name: The backup directory is root's
+  ansible.builtin.file:
+    path: "{{ omada_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: The upload directory inside it is the account's alone
+  ansible.builtin.file:
+    path: "{{ omada_backup_dir }}/upload"
+    state: directory
+    owner: "{{ omada_backup_user }}"
+    group: "{{ omada_backup_user }}"
+    mode: "0700"
+  become: true
+
+# SFTP sessions run in SELinux's sftpd_t domain, which may create files only in
+# user_home_t (and tmp types) - not var_lib_t, where it was refused. Label the
+# upload directory, persistently, so restorecon and relabels keep it.
+- name: Read the SELinux file contexts set locally
+  ansible.builtin.command:
+    argv: [semanage, fcontext, --list, --locallist]
+  register: _omada_backup_fcontexts
+  changed_when: false
+  become: true
+
+- name: Label the upload directory for the SFTP session
+  ansible.builtin.command:
+    argv: [semanage, fcontext, --add, --type, user_home_t, "{{ omada_backup_dir }}/upload(/.*)?"]
+  when: (omada_backup_dir ~ '/upload(/.*)?') not in _omada_backup_fcontexts.stdout
+  become: true
+
+- name: Apply the label
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ omada_backup_dir }}/upload"]
+  register: _omada_backup_restorecon
+  changed_when: _omada_backup_restorecon.stdout | length > 0
+  become: true
+
+- name: Allow password SFTP for the account, from this host only
+  block:
+    - name: Password SFTP for the account, from this host only
+      ansible.builtin.template:
+        src: 10-omada-backup.conf.j2
+        dest: /etc/ssh/sshd_config.d/10-omada-backup.conf
+        owner: root
+        group: root
+        mode: "0600"
+      become: true
+      register: _omada_backup_sshd
+      notify: Reload sshd
+
+    # sshd -T -C prints the settings a given connection would get. The Match block
+    # ends with its file, so password logins must still be off for every other
+    # account and every other address; check that before sshd is reloaded.
+    - name: Check what sshd would now allow
+      ansible.builtin.command:
+        argv: [/usr/sbin/sshd, -T, -C, "{{ item.conn }},host=check"]
+      loop:
+        - {conn: "user={{ omada_backup_user }},addr=127.0.0.1", want: "passwordauthentication yes"}
+        - {conn: "user={{ omada_backup_user }},addr=10.0.0.1", want: "passwordauthentication no"}
+        - {conn: "user={{ ansible_user | default('a_autoprov') }},addr=127.0.0.1", want: "passwordauthentication no"}
+        - {conn: "user={{ ansible_user | default('a_autoprov') }},addr=10.0.0.1", want: "passwordauthentication no"}
+      loop_control:
+        label: "{{ item.conn }}"
+      register: _omada_backup_sshd_check
+      changed_when: false
+      failed_when: item.want not in _omada_backup_sshd_check.stdout_lines
+      become: true
+
+  rescue:
+    - name: Take the drop-in away again
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/10-omada-backup.conf
+        state: absent
+      become: true
+
+    - name: Stop here
+      ansible.builtin.fail:
+        msg: >-
+          With the drop-in in place sshd would not have allowed exactly what it
+          should (see the check above), so it was removed and sshd not reloaded.
+
+- name: Reload sshd now, before the controller connects
+  ansible.builtin.meta: flush_handlers
+
+# --- The backup -----------------------------------------------------------------
+
+- name: Back up, then lock the account and clear the upload directory
+  block:
+    - name: Clear anything an earlier run left
+      ansible.builtin.shell: >-
+        find {{ omada_backup_dir | quote }}/upload -mindepth 1 -delete
+      changed_when: false
+      become: true
+
+    - name: Choose this run's SFTP password
+      ansible.builtin.set_fact:
+        _omada_backup_pw: "{{ lookup('ansible.builtin.password', '/dev/null', chars=['ascii_letters', 'digits'], length=40) }}"
+      no_log: true
+
+    - name: Unlock the account with it
+      ansible.builtin.command:
+        argv: [chpasswd]
+        stdin: "{{ omada_backup_user }}:{{ _omada_backup_pw }}"
+      changed_when: true
+      no_log: true
+      become: true
+
+    - name: Read the controller identity
+      # omada-api: UNDOCUMENTED /api/info tested-on 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/api/info"
+        validate_certs: "{{ site_verify_omada | default(false) }}"
+      register: _omada_backup_info
+
+    - name: Get an access token with the client credentials
+      # omada-api: documented authorize/token (TP-Link Open API guide; not in the served spec) spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/openapi/authorize/token?grant_type=client_credentials"
+        method: POST
+        body_format: json
+        body:
+          omadacId: "{{ _omada_backup_info.json.result.omadacId }}"
+          client_id: "{{ vault_omada_openapi_client_id }}"
+          client_secret: "{{ vault_omada_openapi_client_secret }}"
+        validate_certs: "{{ site_verify_omada | default(false) }}"
+      register: _omada_backup_token
+      failed_when: _omada_backup_token.json.errorCode | default(-1) != 0
+      no_log: true
+
+    - name: Set the API base and header
+      ansible.builtin.set_fact:
+        _omada_backup_api: "{{ omada_url }}/openapi/v1/{{ _omada_backup_info.json.result.omadacId }}"
+        _omada_backup_hdr:
+          Authorization: "AccessToken={{ _omada_backup_token.json.result.accessToken }}"
+      no_log: true
+
+    - name: Ask the controller to back up to this host
+      # omada-api: documented backupToFileServer spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ _omada_backup_api }}/maintenance/backup/file-server"
+        method: POST
+        headers: "{{ _omada_backup_hdr }}"
+        body_format: json
+        body:
+          serverConfig:
+            protocol: SFTP
+            hostname: 127.0.0.1
+            port: 22
+            username: "{{ omada_backup_user }}"
+            password: "{{ _omada_backup_pw }}"
+          filePath: "{{ omada_backup_dir }}/upload"
+          retainUser: true
+          retainAuthRecord: false
+          retainFirmwareLog: false
+          retention: "{{ omada_backup_retention | int }}"
+        validate_certs: "{{ site_verify_omada | default(false) }}"
+      register: _omada_backup_start
+      no_log: true
+
+    # The body is withheld above because the request carries the password; the
+    # answer carries none, so report it here.
+    - name: Check the controller accepted it
+      ansible.builtin.assert:
+        that:
+          - _omada_backup_start.json.errorCode | default(-1) == 0
+        fail_msg: >-
+          The controller refused the backup: errorCode
+          {{ _omada_backup_start.json.errorCode | default('none') }},
+          "{{ _omada_backup_start.json.msg | default('') }}".
+
+    # "0: finished or init; 1: backup running" - a 0 read too soon could be the
+    # state before the backup starts. The controller starts it within a second
+    # of accepting the request, so wait a moment, then for a 0 or an error.
+    - name: Give the controller a moment to start
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Wait for the controller to finish
+      # omada-api: documented getBackupResult spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ _omada_backup_api }}/maintenance/backup/result"
+        headers: "{{ _omada_backup_hdr }}"
+        validate_certs: "{{ site_verify_omada | default(false) }}"
+      register: _omada_backup_result
+      until: >-
+        _omada_backup_result.json.errorCode | default(-1) != 0
+        or _omada_backup_result.json.result.status | default(1) == 0
+      retries: "{{ (omada_backup_timeout | int / 5) | int }}"
+      delay: 5
+
+    # A failed upload still ends with status 0, so the file is the proof.
+    - name: Find the backup file
+      ansible.builtin.find:
+        paths: "{{ omada_backup_dir }}/upload"
+        file_type: file
+      register: _omada_backup_files
+      until: _omada_backup_files.matched | default(0) > 0
+      retries: 3
+      delay: 2
+      ignore_errors: true
+      become: true
+
+    - name: Fail with what the controller said
+      ansible.builtin.fail:
+        msg: >-
+          No backup file arrived. The controller's backup result: errorCode
+          {{ _omada_backup_result.json.errorCode | default('none') }},
+          "{{ _omada_backup_result.json.msg | default('') }}". Its side is in
+          /opt/omada-controller/logs/server.log ("Fail to upload file"), and the SFTP
+          side in `journalctl -u sshd` on this host.
+      when: _omada_backup_files.matched | default(0) == 0
+
+    - name: Read the finished file
+      ansible.builtin.find:
+        paths: "{{ omada_backup_dir }}/upload"
+        file_type: file
+      register: _omada_backup_files
+      become: true
+
+    - name: Expect exactly one backup file
+      ansible.builtin.assert:
+        that:
+          - _omada_backup_files.matched == 1
+          - _omada_backup_files.files[0].size > 0
+        fail_msg: >-
+          Expected one non-empty file in {{ omada_backup_dir }}/upload, found
+          {{ _omada_backup_files.files | map(attribute='path') | list }}.
+
+    - name: Make sure the staging directory exists
+      ansible.builtin.file:
+        path: "{{ omada_backup_stage_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Fetch the backup to the control host
+      ansible.builtin.fetch:
+        src: "{{ _omada_backup_files.files[0].path }}"
+        dest: "{{ omada_backup_stage_dir }}/{{ inventory_hostname }}.cfg"
+        flat: true
+      become: true
+
+    - name: Keep the staged file private
+      ansible.builtin.file:
+        path: "{{ omada_backup_stage_dir }}/{{ inventory_hostname }}.cfg"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Report the staged backup
+      ansible.builtin.debug:
+        msg: >-
+          Controller backup of {{ inventory_hostname }}
+          ({{ _omada_backup_files.files[0].path | basename }},
+          {{ (_omada_backup_files.files[0].size / 1048576) | round(1) }} MiB) staged at
+          {{ omada_backup_stage_dir }}/{{ inventory_hostname }}.cfg, in plaintext.
+          Seal it into the inventory with `make seal-backups`.
+
+  always:
+    - name: Lock the account again
+      ansible.builtin.user:
+        name: "{{ omada_backup_user }}"
+        password_lock: true
+      become: true
+
+    - name: End the controller's session
+      ansible.builtin.command:
+        argv: [loginctl, terminate-user, "{{ omada_backup_user }}"]
+      register: _omada_backup_term
+      changed_when: _omada_backup_term.rc == 0
+      failed_when: false
+      become: true
+
+    - name: Leave nothing in the upload directory
+      ansible.builtin.shell: >-
+        find {{ omada_backup_dir | quote }}/upload -mindepth 1 -delete
+      changed_when: false
+      become: true
