@@ -91,7 +91,10 @@ def main() -> int:
 
     print("Staged backups: " + ", ".join(p.name for p in staged))
     check_name, check_blob = committed_vault_file(args.inventory)
-    password = getpass.getpass("Inventory vault password: ").encode()
+    # The play asked for the vault password already; this second prompt is easy to
+    # miss at the end of a long run, so say what it is for.
+    print("\nSealing the backups above into the inventory. The play is done; this needs the vault password again.")
+    password = getpass.getpass("Inventory vault password (to seal): ").encode()
     vault = VaultLib([("default", VaultSecret(password))])
     try:
         vault.decrypt(check_blob)
