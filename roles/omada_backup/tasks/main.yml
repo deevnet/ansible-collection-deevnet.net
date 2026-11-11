@@ -56,6 +56,29 @@
     mode: "0700"
   become: true
 
+# SFTP sessions run in SELinux's sftpd_t domain, which may create files only in
+# user_home_t (and tmp types) - not var_lib_t, where it was refused. Label the
+# upload directory, persistently, so restorecon and relabels keep it.
+- name: Read the SELinux file contexts set locally
+  ansible.builtin.command:
+    argv: [semanage, fcontext, --list, --locallist]
+  register: _omada_backup_fcontexts
+  changed_when: false
+  become: true
+
+- name: Label the upload directory for the SFTP session
+  ansible.builtin.command:
+    argv: [semanage, fcontext, --add, --type, user_home_t, "{{ omada_backup_dir }}/upload(/.*)?"]
+  when: (omada_backup_dir ~ '/upload(/.*)?') not in _omada_backup_fcontexts.stdout
+  become: true
+
+- name: Apply the label
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ omada_backup_dir }}/upload"]
+  register: _omada_backup_restorecon
+  changed_when: _omada_backup_restorecon.stdout | length > 0
+  become: true
+
 - name: Allow password SFTP for the account, from this host only
   block:
     - name: Password SFTP for the account, from this host only

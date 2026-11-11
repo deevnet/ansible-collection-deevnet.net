@@ -8,8 +8,7 @@ omada_url: "https://localhost:8043"
 # this account on its own host. The account exists for nothing else: no shell,
 # SFTP only, password logins allowed for it only from the host itself, and
 # locked except while a backup runs. Each run sets a new random password, which
-# is never stored. It is not chrooted: SELinux keeps a chrooted SFTP session
-# from writing (see templates/10-omada-backup.conf.j2).
+# is never stored. It is not chrooted (owner's choice, CHG-0062).
 omada_backup_user: omada-backup
 omada_backup_dir: /var/lib/omada-backup
 
