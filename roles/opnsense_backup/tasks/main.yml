@@ -1,0 +1,51 @@
+---
+# Download the router's running configuration to the control host.
+#
+# core/backup/download/this returns config.xml exactly as the router holds it,
+# secrets included. It is written 0600 into a 0700 staging directory, one file
+# per router, named after the inventory host so the sealing script knows where
+# in the inventory it belongs. A second download before sealing replaces the
+# first, which is what you want: the newest configuration is the one to keep.
+#
+# Required: opnsense_api_url, opnsense_api_key, opnsense_api_secret,
+# opnsense_validate_certs (the same variables every opnsense_* role uses).
+
+- name: Make sure the backup staging directory exists
+  ansible.builtin.file:
+    path: "{{ opnsense_backup_stage_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+
+- name: Download the running configuration
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/core/backup/download/this"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    dest: "{{ opnsense_backup_stage_dir }}/{{ inventory_hostname }}.xml"
+    mode: "0600"
+  register: _opnsense_backup_download
+  changed_when: true
+  delegate_to: localhost
+
+# A login page or an API error body saved under the right name would be sealed
+# and committed as if it were a backup, and found out only at restore time.
+- name: Check the download is an OPNsense configuration
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -q
+      - "<opnsense>"
+      - "{{ opnsense_backup_stage_dir }}/{{ inventory_hostname }}.xml"
+  changed_when: false
+  delegate_to: localhost
+
+- name: Report the staged backup
+  ansible.builtin.debug:
+    msg: >-
+      Configuration of {{ inventory_hostname }} staged at
+      {{ opnsense_backup_stage_dir }}/{{ inventory_hostname }}.xml, in
+      plaintext. Seal it into the inventory with `make seal-router-backup`.
