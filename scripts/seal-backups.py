@@ -20,8 +20,10 @@ password would otherwise produce a backup nobody can open, found out only on
 the day it is needed. The check decrypts in memory and prints nothing of it.
 
 Vault encryption is salted, so the same plaintext never encrypts to the same
-file. A backup whose plaintext matches the one already in the inventory is
+file. A backup whose settings match the one already in the inventory is
 therefore not rewritten: a run that changed nothing leaves nothing to commit.
+For a router, the <revision> stamp OPNsense writes on every save is not a
+setting and is left out of that comparison.
 
 Nothing is committed. Inventory changes go through a pull request, so the
 script ends by printing the paths to add.
@@ -32,6 +34,7 @@ Usage: seal-backups.py --stage DIR --inventory DIR --site SITE
 import argparse
 import getpass
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -39,10 +42,21 @@ from pathlib import Path
 from ansible.errors import AnsibleError
 from ansible.parsing.vault import VaultLib, VaultSecret
 
-# Staged suffix -> (file name in the inventory, check the plaintext must pass, what it is)
+# OPNsense stamps every save with a <revision> block (time, user, description),
+# so two saves of the same configuration differ there. It says when the file was
+# written, not what the router does, so it is left out of the comparison.
+_REVISION = re.compile(rb"<revision>.*?</revision>", re.DOTALL)
+
+
+def _opnsense_settings(b: bytes) -> bytes:
+    return _REVISION.sub(b"", b)
+
+
+# Staged suffix -> (file name in the inventory, check the plaintext must pass,
+# what it is, what of it is compared with the committed backup)
 KINDS = {
-    ".xml": ("config.xml.vault", lambda b: b"<opnsense>" in b, "an OPNsense configuration"),
-    ".cfg": ("omada-backup.cfg.vault", lambda b: len(b) > 0, "a non-empty Omada backup"),
+    ".xml": ("config.xml.vault", lambda b: b"<opnsense>" in b, "an OPNsense configuration", _opnsense_settings),
+    ".cfg": ("omada-backup.cfg.vault", lambda b: len(b) > 0, "a non-empty Omada backup", lambda b: b),
 }
 
 
@@ -91,7 +105,7 @@ def main() -> int:
 
     written, failed = [], 0
     for src in staged:
-        dest_name, valid, what = KINDS[src.suffix]
+        dest_name, valid, what, settings = KINDS[src.suffix]
         plaintext = src.read_bytes()
         if not valid(plaintext):
             print(f"{src} is not {what}; left in place, not sealed.", file=sys.stderr)
@@ -100,7 +114,7 @@ def main() -> int:
         dest = args.inventory / "backups" / args.site / src.stem / dest_name
         if dest.exists():
             try:
-                unchanged = vault.decrypt(dest.read_bytes()) == plaintext
+                unchanged = settings(vault.decrypt(dest.read_bytes())) == settings(plaintext)
             except AnsibleError:
                 unchanged = False
             if unchanged:
