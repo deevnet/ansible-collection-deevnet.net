@@ -1,0 +1,10 @@
+# label|extra-vars JSON  (see scripts/wifi-tune.sh)
+# Tuning for range at the far spot. 2.4 G power is already at its 25 dBm
+# maximum, so the variable is the channel. Each trial's settings carry forward.
+baseline|{}
+2g-ch6|{"radio_2g": {"channel": "6", "channelWidth": "2"}}
+2g-ch11|{"radio_2g": {"channel": "11", "channelWidth": "2"}}
+2g-ch1|{"radio_2g": {"channel": "1", "channelWidth": "2"}}
+# 5 G narrowed to 40 MHz on a low channel: more range, still more capacity than 2.4 G.
+# Only shows up if the Mac chooses 5 G at this spot - mac_channel says which band it used.
+5g-ch36-40|{"radio_5g": {"channel": "36", "channelWidth": "3"}}
