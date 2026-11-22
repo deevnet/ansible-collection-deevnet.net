@@ -1,0 +1,288 @@
+---
+# AP radio settings, read and set through the Omada Open API (ADR-0009)
+#
+# A tuning tool, not a declaration: radio channel, width and transmit power are
+# being worked out by measurement (scripts/wifi-tune.sh), so they are not in
+# inventory yet. Once a setting is chosen it belongs in host_vars/<omada_ap_host>
+# and in omada-wireless.yml.
+#
+# Modes:
+#
+#   read (default)   No writes. Reads the AP's radio config, the radios' live
+#                    state (channel, width, power, utilization, interference,
+#                    retries) and, with radio_client_mac, one client as the AP
+#                    sees it (RSSI, SNR, link rates).
+#   apply            -e radio_apply=true with radio_2g and/or radio_5g. Each is
+#                    merged onto the band's CURRENT settings, so only the keys
+#                    given change. Patches only when something differs, waits
+#                    radio_settle seconds, then reads back and verifies.
+#
+# A channel or width change restarts that radio: every client on the band
+# drops and reconnects, typically within 10-30 s. Transmit power does not.
+#
+# Field values (radioSetting* in the controller's spec):
+#   channelWidth  "2" 20 MHz, "3" 40, "4" 40/20 (2.4 G auto), "5" 80, "6" 5 G auto
+#   channel       "0" auto, else the channel number; see getAvailableChannelOfAp.
+#                 The controller goes by freq, not channel, when they disagree,
+#                 and freq 0 means auto - so the play sets freq from channel.
+#   txPowerLevel  0 low, 1 medium, 2 high, 3 custom (uses txPower, dBm), 4 auto
+#
+# radio_report writes everything read to a JSON file on the control node, for
+# the tuning script to record.
+#
+# Needs, in group_vars/network_controllers/vault.yml (decrypted):
+#   vault_omada_openapi_client_id / _secret
+#
+# API markers (ADR-0009). On a controller upgrade:  grep -rn "omada-api: UNDOCUMENTED"
+#
+# Usage:
+#   ansible-playbook playbooks/omada-radio-tune.yml
+#   ansible-playbook playbooks/omada-radio-tune.yml -e radio_client_mac=AA-BB-CC-DD-EE-FF
+#   ansible-playbook playbooks/omada-radio-tune.yml -e radio_apply=true \
+#     -e '{"radio_2g": {"channel": "6", "channelWidth": "2", "txPowerLevel": 2}}'
+
+- name: AP radio settings through the Omada Open API
+  hosts: network_controllers
+  gather_facts: false
+  vars:
+    omada_url: "https://localhost:8043"
+    omada_marked_version: "6.3.0.45"
+    omada_ap_host: dv02wap001p01
+    radio_apply: false
+    radio_2g: {}
+    radio_5g: {}
+    radio_settle: 45
+    radio_client_mac: ""
+    radio_report: ""
+
+    # radio_2g / radio_5g with freq derived from channel (see the header).
+    _radio_2g: >-
+      {{ radio_2g | combine({'freq': 0 if radio_2g.channel | int == 0 else 2407 + 5 * radio_2g.channel | int})
+         if 'channel' in radio_2g else radio_2g }}
+    _radio_5g: >-
+      {{ radio_5g | combine({'freq': 0 if radio_5g.channel | int == 0 else 5000 + 5 * radio_5g.channel | int})
+         if 'channel' in radio_5g else radio_5g }}
+
+    omada_endpoints:
+      - {method: get, path: "/openapi/v1/{omadacId}/sites"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config"}
+      - {method: patch, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radios"}
+      - {method: get, path: "/openapi/v1/{omadacId}/sites/{siteId}/clients/{clientMac}"}
+
+  tasks:
+    # --- Preflight --------------------------------------------------------------
+
+    - name: Read the controller identity
+      # omada-api: UNDOCUMENTED /api/info tested-on 6.3.0.45
+      # Unauthenticated; the only source of omadacId before a token exists.
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/api/info"
+        validate_certs: false
+      register: omada_info
+
+    - name: Note when the controller is not the version the markers were checked on
+      ansible.builtin.debug:
+        msg: >-
+          Controller is {{ omada_info.json.result.controllerVer }}; this play's markers were
+          checked on {{ omada_marked_version }}. The endpoint check protects the documented
+          calls; re-test the UNDOCUMENTED one by hand.
+      when: omada_info.json.result.controllerVer != omada_marked_version
+
+    - name: Fetch the Open API spec the running controller publishes
+      # omada-api: documented springdoc /v3/api-docs spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/v3/api-docs/00%20All"
+        validate_certs: false
+        timeout: 120
+      register: omada_spec
+
+    - name: Refuse to run if an endpoint this play uses is not documented here
+      ansible.builtin.assert:
+        that:
+          - item.path in omada_spec.json.paths
+          - item.method in omada_spec.json.paths[item.path]
+        fail_msg: >-
+          {{ item.method | upper }} {{ item.path }} is not in the spec published by controller
+          {{ omada_info.json.result.controllerVer }}.
+        quiet: true
+      loop: "{{ omada_endpoints }}"
+      loop_control:
+        label: "{{ item.method | upper }} {{ item.path }}"
+
+    - name: Refuse radio settings the play does not recognise
+      # A misspelt key would be merged in, sent, and silently ignored.
+      ansible.builtin.assert:
+        that:
+          - (radio_2g.keys() | list | difference(_known)) | length == 0
+          - (radio_5g.keys() | list | difference(_known)) | length == 0
+          - not radio_apply or (radio_2g | length + radio_5g | length) > 0
+        fail_msg: >-
+          radio_2g / radio_5g may only set {{ _known | join(', ') }}, and apply needs at least one.
+      vars:
+        _known: [radioEnable, channel, channelWidth, txPowerLevel, txPower, wirelessMode]
+
+    - name: Refuse to run without the Open API client
+      ansible.builtin.assert:
+        that:
+          - vault_omada_openapi_client_id is defined
+          - vault_omada_openapi_client_secret is defined
+        fail_msg: >-
+          No Open API client in the vault. Decrypt the inventory vault files first
+          (cd ansible-inventory-deevnet && make unvault).
+        quiet: true
+
+    - name: Get an access token with the client credentials
+      # omada-api: documented authorize/token (TP-Link Open API guide; not in the served spec) spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_url }}/openapi/authorize/token?grant_type=client_credentials"
+        method: POST
+        body_format: json
+        body:
+          omadacId: "{{ omada_info.json.result.omadacId }}"
+          client_id: "{{ vault_omada_openapi_client_id }}"
+          client_secret: "{{ vault_omada_openapi_client_secret }}"
+        validate_certs: false
+      register: omada_token
+      failed_when: omada_token.json.errorCode | default(-1) != 0
+      no_log: true
+
+    - name: Set the API base and header
+      ansible.builtin.set_fact:
+        omada_api: "{{ omada_url }}/openapi/v1/{{ omada_info.json.result.omadacId }}"
+        omada_hdr:
+          Authorization: "AccessToken={{ omada_token.json.result.accessToken }}"
+      no_log: true
+
+    - name: List sites
+      # omada-api: documented getSiteList spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_api }}/sites?page=1&pageSize=100"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: omada_sites
+      failed_when: omada_sites.json.errorCode != 0 or omada_sites.json.result.data | length != 1
+
+    - name: Set the site and AP paths
+      ansible.builtin.set_fact:
+        omada_site: "{{ omada_api }}/sites/{{ omada_sites.json.result.data[0].siteId }}"
+        omada_ap: >-
+          {{ omada_api }}/sites/{{ omada_sites.json.result.data[0].siteId }}/aps/{{
+             hostvars[omada_ap_host].infrastructure.interfaces.eth0.mac | upper | replace(':', '-') }}
+
+    # --- Read -------------------------------------------------------------------
+
+    - name: Read the AP's radio config
+      # omada-api: documented getRadiosConfig spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_ap }}/radio-config"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: radio_config
+      failed_when: radio_config.json.errorCode != 0
+
+    # --- Apply ------------------------------------------------------------------
+
+    - name: Set the radios
+      when: radio_apply | bool
+      vars:
+        _cur: "{{ radio_config.json.result }}"
+        _want: >-
+          {{ ({'radioSetting2g': _cur.radioSetting2g | combine(_radio_2g)} if radio_2g else {})
+             | combine({'radioSetting5g': _cur.radioSetting5g | combine(_radio_5g)} if radio_5g else {}) }}
+        _differs: >-
+          {{ (radio_2g and _cur.radioSetting2g | combine(_radio_2g) != _cur.radioSetting2g)
+             or (radio_5g and _cur.radioSetting5g | combine(_radio_5g) != _cur.radioSetting5g) }}
+      block:
+        - name: Patch the radio config
+          # omada-api: documented modifyRadiosConfig spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_ap }}/radio-config"
+            method: PATCH
+            headers: "{{ omada_hdr }}"
+            body_format: json
+            body: "{{ _want }}"
+            validate_certs: false
+          register: radio_patched
+          failed_when: radio_patched.json.errorCode != 0
+          changed_when: true
+          when: _differs | bool
+
+        - name: Let the radios restart and clients reconnect
+          ansible.builtin.pause:
+            seconds: "{{ radio_settle }}"
+          when: radio_patched is changed
+
+        # Its own register: a skipped task still overwrites what it registers,
+        # which would lose radio_config in read mode.
+        - name: Read the radio config back
+          # omada-api: documented getRadiosConfig spec 6.3.0.45
+          ansible.builtin.uri:
+            url: "{{ omada_ap }}/radio-config"
+            headers: "{{ omada_hdr }}"
+            validate_certs: false
+          register: radio_config_after
+          failed_when: radio_config_after.json.errorCode != 0
+
+        - name: Take the read-back as the current config
+          ansible.builtin.set_fact:
+            radio_config: "{{ radio_config_after }}"
+
+        - name: Verify the controller holds what was set
+          ansible.builtin.assert:
+            that:
+              - radio_config.json.result.radioSetting2g | combine(_radio_2g) == radio_config.json.result.radioSetting2g
+              - radio_config.json.result.radioSetting5g | combine(_radio_5g) == radio_config.json.result.radioSetting5g
+            fail_msg: "The controller did not keep every radio setting that was sent."
+            quiet: true
+
+    # --- Live state ---------------------------------------------------------------
+
+    - name: Read the radios' live state
+      # omada-api: documented getRadiosDetail spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_ap }}/radios"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: radio_detail
+      failed_when: radio_detail.json.errorCode != 0
+
+    - name: Read the client as the AP sees it
+      # omada-api: documented getClientDetail spec 6.3.0.45
+      ansible.builtin.uri:
+        url: "{{ omada_site }}/clients/{{ radio_client_mac | upper | replace(':', '-') }}"
+        headers: "{{ omada_hdr }}"
+        validate_certs: false
+      register: radio_client
+      failed_when: false
+      when: radio_client_mac | length > 0
+
+    - name: Summarise
+      vars:
+        _cfg: "{{ radio_config.json.result }}"
+        _live: "{{ radio_detail.json.result }}"
+        _cl: "{{ radio_client.json.result | default({}) if radio_client is not skipped else {} }}"
+      ansible.builtin.set_fact:
+        radio_summary:
+          config:
+            2g: "{{ _cfg.radioSetting2g | dict2items | selectattr('key', 'in', ['radioEnable', 'channel', 'channelWidth', 'txPowerLevel', 'txPower']) | items2dict }}"
+            5g: "{{ _cfg.radioSetting5g | dict2items | selectattr('key', 'in', ['radioEnable', 'channel', 'channelWidth', 'txPowerLevel', 'txPower']) | items2dict }}"
+          live:
+            2g: "{{ _live.wp2g | default({}) }}"
+            5g: "{{ _live.wp5g | default({}) }}"
+          traffic:
+            2g: "{{ _live.radioTraffic2g | default({}) }}"
+            5g: "{{ _live.radioTraffic5g | default({}) }}"
+          client: "{{ _cl | dict2items | selectattr('key', 'in', ['ssid', 'channel', 'radioId', 'rssi', 'snr', 'signalLevel', 'txRate', 'rxRate', 'activity', 'uploadActivity']) | items2dict }}"
+
+    - name: Show the radios
+      ansible.builtin.debug:
+        var: radio_summary
+
+    - name: Write the report for the tuning script
+      ansible.builtin.copy:
+        content: "{{ radio_summary | to_nice_json }}"
+        dest: "{{ radio_report }}"
+        mode: "0644"
+      delegate_to: localhost
+      when: radio_report | length > 0

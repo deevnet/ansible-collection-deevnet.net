@@ -5,3 +5,7 @@ ansible_collections/
 
 # Migration logs
 migration-logs/
+
+# Local run output: segment/connectivity logs, wifi-tune.sh runs
+scripts/*.log
+scripts/wifi-tune-*/
