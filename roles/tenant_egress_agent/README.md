@@ -22,6 +22,20 @@ the generated `frr.conf`) and reloads FRR.
   so tenants keep the egress they had. The timer tries again.
 - **A removed tenant loses its route** on the next run, because the rendered
   file is the whole list rather than an append.
+- **It says what the API answered.** Every failure leaves the file as it is;
+  the message and the unit's result tell them apart:
+
+  | The API | The agent logs | The unit |
+  |---|---|---|
+  | answers 200 | nothing, or `rewrote` when the list changed | succeeds |
+  | answers 503 (up, not ready) | `the API is up but not ready (503: <its reason>)` | succeeds, `ExecMainStatus=75` |
+  | refuses the token (401, 403) | `the API refused this agent's token` | fails |
+  | answers anything else | `the API answered <status>` | fails |
+  | gives no answer (network, DNS, TLS, not running) | `cannot reach <url>` | fails |
+
+  A 503 is not a failed unit because nothing on the exit node is wrong and it
+  clears on its own (INC-0007). Since API v0.28.1 the list answers while
+  OpenBao is sealed, so a 503 now means the API's database is not migrated yet.
 - **No churn.** Identical content is not rewritten, so FRR is not reloaded for
   nothing.
 
