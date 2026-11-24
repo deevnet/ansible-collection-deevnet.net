@@ -18,7 +18,8 @@
           'cnames': _dns_cnames
         }]
       }}
-  loop: "{{ groups['all'] }}"
+  # A host in `inactive` is declared but not built: it gets no record.
+  loop: "{{ groups['all'] | difference(groups['inactive'] | default([])) }}"
   when:
     - hostvars[item]['env'] is defined
     - hostvars[item]['env']['interfaces'] is defined

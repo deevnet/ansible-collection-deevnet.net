@@ -26,7 +26,8 @@
           'pxe_boot_file': _pxe_boot_file
         }]
       }}
-  loop: "{{ groups['all'] }}"
+  # A host in `inactive` is declared but not built: it gets no record.
+  loop: "{{ groups['all'] | difference(groups['inactive'] | default([])) }}"
   when:
     - hostvars[item]['env'] is defined
     - hostvars[item]['env']['interfaces'] is defined
@@ -58,7 +59,9 @@
     _pxe_tftp_server: "{{ _pxe_boot.tftp_server | default('') }}"
     _pxe_boot_file: "{{ _pxe_boot.boot_file | default('') }}"
 
-- name: Build list of MACs to remove (dhcp_reservation is false)
+# A host with dhcp_reservation: false, or any host in `inactive` (declared, not
+# built), has its reservation removed.
+- name: Build list of MACs to remove (dhcp_reservation is false, or the host is inactive)
   ansible.builtin.set_fact:
     dhcp_macs_to_remove: >-
       {{
@@ -82,7 +85,8 @@
         _env_interfaces
         | selectattr('value.dns', 'defined')
         | selectattr('value.dns.dhcp_reservation', 'defined')
-        | selectattr('value.dns.dhcp_reservation', 'equalto', false)
+        | selectattr('value.dns.dhcp_reservation', 'in',
+                     [true, false] if item in (groups['inactive'] | default([])) else [false])
         | first
         | default({})
       }}

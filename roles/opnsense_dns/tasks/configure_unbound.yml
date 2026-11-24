@@ -366,6 +366,11 @@
 #      those records regardless.
 #   3. The name is absent from inventory.
 #
+# A host in `inactive` is declared but not built. Its override is deleted
+# whatever dns_delete_unmanaged says: inventory says outright that the name
+# should not resolve. Move a host's service CNAMEs elsewhere before making it
+# inactive; its own aliases are not followed here.
+#
 # Aliases go first: an alias points at an override's UUID, so removing the
 # override first would orphan it.
 - name: Identify managed records inventory no longer declares
@@ -395,7 +400,7 @@
       - Overrides: {{ overrides_to_delete | map(attribute='hostname') | list | join(', ') | default('none', true) }}
       {{ 'These will be DELETED (dns_delete_unmanaged is true).'
          if dns_delete_unmanaged | bool
-         else 'These are being LEFT IN PLACE. Set dns_delete_unmanaged=true to remove them.' }}
+         else 'These are being LEFT IN PLACE, but for any host in inactive. Set dns_delete_unmanaged=true to remove them.' }}
   when: (aliases_to_delete | length + overrides_to_delete | length) > 0
 
 - name: Delete aliases inventory no longer declares
@@ -433,7 +438,7 @@
   loop: "{{ overrides_to_delete }}"
   loop_control:
     label: "Deleting override: {{ item.hostname }}.{{ item.domain }} -> {{ item.ip }}"
-  when: dns_delete_unmanaged | bool
+  when: dns_delete_unmanaged | bool or item.hostname in (groups['inactive'] | default([]))
   delegate_to: localhost
   changed_when: true
   notify: reconfigure unbound
@@ -445,7 +450,8 @@
       DNS configuration complete (idempotent):
       - Host overrides added: {{ overrides_to_add | length }}
       - Host overrides checked: {{ overrides_to_check | length }}
-      - Host overrides deleted: {{ overrides_to_delete | length if dns_delete_unmanaged | bool else 0 }}
+      - Host overrides deleted: {{ overrides_to_delete | length if dns_delete_unmanaged | bool
+                                   else overrides_to_delete | selectattr('hostname', 'in', groups['inactive'] | default([])) | list | length }}
       - Aliases added: {{ aliases_to_add | length }}
       - Aliases checked: {{ aliases_to_check | length }}
       - Aliases deleted: {{ aliases_to_delete | length if dns_delete_unmanaged | bool else 0 }}
