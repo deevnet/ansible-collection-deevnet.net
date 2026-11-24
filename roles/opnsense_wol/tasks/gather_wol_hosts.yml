@@ -10,7 +10,8 @@
 - name: Gather WoL entries from all hosts
   ansible.builtin.set_fact:
     wol_hosts: "{{ wol_hosts + _host_wol_entries }}"
-  loop: "{{ groups['all'] }}"
+  # A host in `inactive` is declared but not built: it is not woken.
+  loop: "{{ groups['all'] | difference(groups['inactive'] | default([])) }}"
   loop_control:
     label: "{{ item }}"
   when:
