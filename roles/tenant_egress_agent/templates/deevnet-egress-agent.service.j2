@@ -8,5 +8,8 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile={{ tenant_egress_agent_env }}
 ExecStart={{ tenant_egress_agent_bin }}
-# A failed fetch is normal while the API is down; the timer tries again.
-SuccessExitStatus=0
+# 75: the API answered 503, up but not ready. The agent changed nothing and the
+# timer tries again; that is not a fault on the exit node, so the unit does not
+# fail (INC-0007). An API that cannot be reached, refuses the token or answers
+# anything else still fails it.
+SuccessExitStatus=75

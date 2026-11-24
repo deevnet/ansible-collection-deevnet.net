@@ -16,16 +16,55 @@ GATEWAY="${DEEVNET_TRANSIT_GATEWAY:?}"
 CA="${DEEVNET_API_CACERT:-}"
 TARGET="${DEEVNET_FRR_LOCAL:-/etc/frr/frr.conf.local}"
 
-curl_args=(--silent --show-error --fail --max-time 20
-  --header "Authorization: Bearer ${DEEVNET_AGENT_TOKEN}")
+body=$(mktemp)
+trap 'rm -f "$body"' EXIT
+
+curl_args=(--silent --show-error --max-time 20
+  --header "Authorization: Bearer ${DEEVNET_AGENT_TOKEN}"
+  --output "$body" --write-out '%{http_code}')
 [[ -n "$CA" ]] && curl_args+=(--cacert "$CA")
 
-# A failed fetch changes nothing: the file on disk keeps the last list the API
-# was known to hold, so an API outage never withdraws a tenant's egress.
-if ! response=$(curl "${curl_args[@]}" "${DEEVNET_API_URL}/v1/fabric/egress"); then
+# Exit status for an API that is up but not ready: a success to systemd
+# (SuccessExitStatus=75 in the unit), so the unit does not fail, yet still
+# visible as ExecMainStatus=75 (EX_TEMPFAIL).
+NOT_READY=75
+
+# The API's own reason, from its fixed {"error": "..."} shape; never a secret.
+api_error() {
+  python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("error", ""))
+except Exception: pass' "$body" 2>/dev/null | head -c 200
+}
+
+# Whatever goes wrong, the file on disk is left as it is: it keeps the last list
+# the API was known to hold, so no failure here withdraws a tenant's egress. What
+# differs is what the agent says, and whether its unit fails (INC-0007).
+if ! status=$(curl "${curl_args[@]}" "${DEEVNET_API_URL}/v1/fabric/egress"); then
+  # No HTTP answer at all: the network, DNS, TLS, or an API that is not running.
   echo "egress-agent: cannot reach ${DEEVNET_API_URL}; leaving ${TARGET} as it is" >&2
   exit 1
 fi
+
+case "$status" in
+  200)
+    response=$(cat "$body")
+    ;;
+  503)
+    # Up, answering, and not ready: before API v0.28.1 that was every start
+    # while OpenBao was sealed; now it is the database not yet migrated. Not a
+    # fault on this side, and it clears on its own.
+    echo "egress-agent: the API is up but not ready (503: $(api_error)); leaving ${TARGET} as it is" >&2
+    exit "$NOT_READY"
+    ;;
+  401|403)
+    echo "egress-agent: the API refused this agent's token (${status}); leaving ${TARGET} as it is" >&2
+    exit 1
+    ;;
+  *)
+    echo "egress-agent: the API answered ${status} ($(api_error)); leaving ${TARGET} as it is" >&2
+    exit 1
+    ;;
+esac
 
 # The JSON arrives on stdin, so the program comes from -c: a heredoc would be
 # stdin too, and the two would collide.
