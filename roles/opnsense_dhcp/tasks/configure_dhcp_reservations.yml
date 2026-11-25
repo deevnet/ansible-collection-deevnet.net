@@ -115,6 +115,51 @@
       Reservations to check/update: {{ reservations_to_update | length }}
       MACs to remove: {{ dhcp_macs_to_remove | default([]) | length }}
 
+# Step 3b: A host's address moving to another MAC (a NIC or cable swap).
+#
+# Kea refuses a second reservation for the same address ("Duplicate entry
+# exists"), and the prune below runs after the add, so the old row has to go
+# first. Only this role's own rows whose MAC inventory no longer declares, and
+# only when the address they hold is being reserved again for a new MAC.
+- name: Find managed reservations whose address moves to a new MAC
+  ansible.builtin.set_fact:
+    reservations_superseded: >-
+      {{
+        existing_maps_by_mac | dict2items
+        | selectattr('value.description', 'search', '^' ~ (dhcp_description_prefix | regex_escape))
+        | rejectattr('key', 'in', dhcp_reservations_to_add | map(attribute='mac') | map('upper') | list)
+        | selectattr('value.ip', 'in', reservations_to_add | map(attribute='ip') | list)
+        | list
+      }}
+
+- name: Delete reservations whose address moves to a new MAC
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/del_reservation/{{ item.value.uuid }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    status_code: [200, 201]
+    return_content: true
+  register: _api_del_superseded
+  failed_when: >-
+    (_api_del_superseded.json | default({})).result | default('') not in ['deleted', 'saved']
+  loop: "{{ reservations_superseded }}"
+  loop_control:
+    label: "Superseded: {{ item.value.hostname | default('') }} {{ item.value.ip }} ({{ item.key }})"
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
+# Without this the prune below would try to delete the same rows again.
+- name: Forget the superseded reservations
+  ansible.builtin.set_fact:
+    existing_maps_by_mac: >-
+      {{ existing_maps_by_mac | dict2items
+         | rejectattr('key', 'in', reservations_superseded | map(attribute='key') | list)
+         | items2dict }}
+
 # Step 4: Add new reservations
 - name: Add new DHCP reservations
   ansible.builtin.uri:
