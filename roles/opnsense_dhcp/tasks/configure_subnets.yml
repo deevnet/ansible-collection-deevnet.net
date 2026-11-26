@@ -205,6 +205,125 @@
     - not ansible_check_mode
     - item.json is defined
 
+# Step 3c: The subnet's next-server follows the `pxe` name.
+#
+# UEFI firmware fetches its boot file from the DHCP header's next-server
+# (siaddr), not from option 66, so a reservation's tftp_server_name alone does
+# not move a network boot. It was set by hand on the router, and a repave that
+# moved `pxe` to the temporary builder but not this left the Builder asking
+# itself for grubx64.efi (CHG-0092). Now the host whose interface carries the
+# `pxe` CNAME sets next-server on the subnet its address is in. A subnet with
+# no such host is left as it is.
+- name: Find the addresses that carry the pxe name
+  ansible.builtin.set_fact:
+    _pxe_ips: >-
+      {%- set out = [] -%}
+      {%- for h in groups['all'] -%}
+      {%- for n, i in (hostvars[h].env.interfaces | default({})).items() -%}
+      {%- if 'pxe' in ((i.dns | default({})).cnames | default([])) and i.ip is defined -%}
+      {%- set _ = out.append({'host': h, 'ip': i.ip}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Work out each subnet's next-server
+  ansible.builtin.set_fact:
+    _next_server_want: >-
+      {{
+        _next_server_want | default({}) | combine({
+          (item.ip | deevnet.net.dhcp_subnet_for_ip(_existing_subnet_map)): item.ip
+        })
+      }}
+  loop: "{{ _pxe_ips }}"
+  loop_control:
+    label: "{{ item.host }}: {{ item.ip }}"
+  when: (item.ip | deevnet.net.dhcp_subnet_for_ip(_existing_subnet_map)) | length > 0
+
+- name: One pxe host per subnet
+  ansible.builtin.assert:
+    that: (_pxe_ips | map(attribute='ip')
+           | map('deevnet.net.dhcp_subnet_for_ip', _existing_subnet_map)
+           | select | list | length)
+          == (_next_server_want | default({}) | length)
+    fail_msg: >-
+      More than one host in a subnet carries the pxe CNAME: {{ _pxe_ips }}.
+      Network boot has one server per subnet; move the name to one of them.
+
+- name: Read the subnets that get a next-server
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ item.key }}"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  loop: "{{ _next_server_want | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.value }}"
+  register: _ns_before
+  delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
+
+- name: Set next-server on the subnets where it differs
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/set_subnet/{{ item.item.key }}"
+    method: POST
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    body_format: json
+    body:
+      subnet4:
+        next_server: "{{ item.item.value }}"
+    status_code: [200, 201]
+    return_content: true
+  failed_when: >-
+    (_ns_results.json | default({})).result | default('') != 'saved'
+  loop: "{{ _ns_before.results | default([]) }}"
+  loop_control:
+    label: "{{ item.json.subnet4.subnet | default(item.item.key) }}: {{ item.json.subnet4.next_server | default('') }} -> {{ item.item.value }}"
+  when:
+    - item.json is defined
+    - (item.json.subnet4.next_server | default('')) != item.item.value
+  register: _ns_results
+  delegate_to: localhost
+  changed_when: true
+  notify: reconfigure dhcp
+
+- name: Read back the subnets whose next-server was set
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ item.item.item.key }}"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  loop: "{{ _ns_results.results | default([]) | rejectattr('skipped', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.item.value }}"
+  register: _ns_after
+  delegate_to: localhost
+  when: not ansible_check_mode
+
+- name: Assert next-server changed and nothing else on the subnet did
+  ansible.builtin.assert:
+    that:
+      - item.json.subnet4.next_server == item.item.item.item.value
+      - item.json.subnet4.subnet == item.item.item.json.subnet4.subnet
+      - item.json.subnet4.pools == item.item.item.json.subnet4.pools
+      - item.json.subnet4.option_data.routers == item.item.item.json.subnet4.option_data.routers
+    fail_msg: >-
+      Setting next-server left the subnet as {{ item.json.subnet4 | default({}) }}.
+      Put it right in the router's UI before running this again.
+  loop: "{{ _ns_after.results | default([]) | rejectattr('skipped', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.item.item.value | default('skipped') }}"
+  when: not ansible_check_mode
+
 # Step 4: Re-fetch subnets to get UUIDs for newly created ones
 - name: Get updated Kea DHCP subnets
   ansible.builtin.uri:
