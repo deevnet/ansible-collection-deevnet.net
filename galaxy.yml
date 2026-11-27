@@ -16,3 +16,11 @@ tags:
 dependencies:
   ansible.posix: ">=1.5.0"
   ansible.netcommon: ">=7.0.0"
+
+# Kept out of the tarball. .ansible holds the collection installed from the
+# previous tarball (make install-dev), so without this each build packed every
+# earlier one inside it.
+build_ignore:
+  - .ansible
+  - "*.tar.gz"
+  - .deps.stamp
