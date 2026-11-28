@@ -176,14 +176,14 @@
       {%- set out = [] -%}
       {%- for r in _subnet_before.results
             if r.json is defined and r.json.subnet4 is defined -%}
-      {%- set send = r.item.value | deevnet.net.kea_subnet_diff(r.json.subnet4) -%}
+      {%- set send = r.item.value | deevnet.net.kea_diff(r.json.subnet4) -%}
       {%- if send | length > 0 -%}
       {%- set _ = out.append({
             'key': r.item.key,
             'uuid': _existing_subnet_map[deevnet_vlans[r.item.key].subnet],
             'before': r.json.subnet4,
             'send': send,
-            'report': r.item.value | deevnet.net.kea_subnet_drift_report(r.json.subnet4),
+            'report': r.item.value | deevnet.net.kea_drift_report(r.json.subnet4),
           }) -%}
       {%- endif -%}
       {%- endfor -%}
@@ -239,13 +239,13 @@
 - name: Assert each subnet now matches inventory and nothing else on it moved
   ansible.builtin.assert:
     that:
-      - (item.item.send | deevnet.net.kea_subnet_diff(item.json.subnet4)) | length == 0
-      - (item.item.before | deevnet.net.kea_subnet_changed(item.json.subnet4, item.item.send)) | length == 0
+      - (item.item.send | deevnet.net.kea_diff(item.json.subnet4)) | length == 0
+      - (item.item.before | deevnet.net.kea_changed(item.json.subnet4, item.item.send)) | length == 0
     fail_msg: >-
       Setting {{ item.item.send }} on {{ item.item.key }} left it still
-      differing in {{ item.item.send | deevnet.net.kea_subnet_drift_report(item.json.subnet4) }}
+      differing in {{ item.item.send | deevnet.net.kea_drift_report(item.json.subnet4) }}
       and changed fields it was not sent:
-      {{ item.item.before | deevnet.net.kea_subnet_changed(item.json.subnet4, item.item.send) }}.
+      {{ item.item.before | deevnet.net.kea_changed(item.json.subnet4, item.item.send) }}.
       Put it right in the router's UI before running this again.
   loop: "{{ _subnet_after.results | default([]) }}"
   loop_control:

@@ -1,5 +1,5 @@
-"""Filter plugin for Kea DHCP subnets: UUID lookups, and comparing a subnet's
-declared settings with what the router holds."""
+"""Filter plugin for Kea DHCP: subnet UUID lookups, and comparing a record's
+(subnet or reservation) declared settings with what the router holds."""
 
 import ipaddress
 import re
@@ -31,7 +31,7 @@ def dhcp_subnet_for_ip(ip_address, subnet_by_cidr):
     return ''
 
 
-# Comparing a subnet
+# Comparing a Kea record (a subnet4 or a reservation)
 # ------------------------------------------------------------------------------
 # get_subnet does not hand back what set_subnet was sent. A multi-value field
 # such as option_data.routers comes back as OPNsense's option list,
@@ -82,7 +82,7 @@ def _leaves(subnet, prefix=''):
     return out
 
 
-def kea_subnet_diff(want, have):
+def kea_diff(want, have):
     """The part of `want` the router does not already hold.
 
     Args:
@@ -109,7 +109,7 @@ def kea_subnet_diff(want, have):
     return out
 
 
-def kea_subnet_drift_report(want, have):
+def kea_drift_report(want, have):
     """One line per field that differs: "field: 'held' -> 'declared'"."""
     have_flat = _flatten(have)
     return [
@@ -119,7 +119,7 @@ def kea_subnet_drift_report(want, have):
     ]
 
 
-def kea_subnet_changed(before, after, sent):
+def kea_changed(before, after, sent):
     """Fields that changed between two reads of a subnet but were not sent.
 
     Args:
@@ -140,7 +140,7 @@ class FilterModule:
     def filters(self):
         return {
             'dhcp_subnet_for_ip': dhcp_subnet_for_ip,
-            'kea_subnet_diff': kea_subnet_diff,
-            'kea_subnet_drift_report': kea_subnet_drift_report,
-            'kea_subnet_changed': kea_subnet_changed,
+            'kea_diff': kea_diff,
+            'kea_drift_report': kea_drift_report,
+            'kea_changed': kea_changed,
         }

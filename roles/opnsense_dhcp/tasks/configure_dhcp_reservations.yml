@@ -193,10 +193,72 @@
   changed_when: true
   notify: reconfigure dhcp
 
-# Step 5: Update existing reservations if IP or hostname changed
-- name: Update existing DHCP reservations (if changed)
+# Step 5: Update existing reservations whose settings differ from inventory.
+#
+# Each one is read first and compared with what inventory declares (the same
+# kea_diff the subnets use, which reads the subnet field's option list as its
+# selected UUID). Only a reservation that differs is written, so a run with
+# nothing to change reports nothing changed; this step used to rewrite every
+# reservation on every run. hw_address is not compared: it is the key the
+# reservation was found by, matched case-insensitively above, and the router
+# may hold it in another case. A reservation that differs is sent in full, as
+# before.
+- name: Read existing reservations inventory declares
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/kea/dhcpv4/set_reservation/{{ existing_maps_by_mac[item.mac].uuid }}"
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_reservation/{{ existing_maps_by_mac[item.mac].uuid }}"
+    method: GET
+    user: "{{ opnsense_api_key }}"
+    password: "{{ opnsense_api_secret }}"
+    force_basic_auth: true
+    validate_certs: "{{ opnsense_validate_certs }}"
+    return_content: true
+  loop: "{{ reservations_to_update }}"
+  loop_control:
+    label: "{{ item.hostname }} ({{ item.mac }})"
+  register: _res_before
+  delegate_to: localhost
+  check_mode: false  # read-only query; must run so --check can compute a diff
+
+- name: Work out which reservations differ from inventory
+  ansible.builtin.set_fact:
+    _res_drift: >-
+      {%- set out = [] -%}
+      {%- for r in _res_before.results | default([])
+            if r.json is defined and r.json.reservation is defined -%}
+      {%- set compare = {
+            'subnet': r.item.ip | deevnet.net.dhcp_subnet_for_ip(dhcp_subnet_by_cidr),
+            'ip_address': r.item.ip,
+            'hostname': r.item.hostname,
+            'description': r.item.description,
+            'option_data': {
+              'tftp_server_name': r.item.pxe_tftp_server | default(''),
+              'boot_file_name': r.item.pxe_boot_file | default(''),
+            },
+          } -%}
+      {%- set report = compare | deevnet.net.kea_drift_report(r.json.reservation) -%}
+      {%- if report | length > 0 -%}
+      {%- set _ = out.append({
+            'mac': r.item.mac,
+            'hostname': r.item.hostname,
+            'uuid': existing_maps_by_mac[r.item.mac].uuid,
+            'send': compare | combine({'hw_address': r.item.mac}),
+            'report': report,
+          }) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Report reservations that differ from inventory
+  ansible.builtin.debug:
+    msg: "{{ item.hostname }}: {{ item.report }}"
+  loop: "{{ _res_drift }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  changed_when: true
+
+- name: Update existing DHCP reservations that differ
+  ansible.builtin.uri:
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/set_reservation/{{ item.uuid }}"
     method: POST
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
@@ -204,24 +266,14 @@
     validate_certs: "{{ opnsense_validate_certs }}"
     body_format: json
     body:
-      reservation:
-        subnet: "{{ item.ip | deevnet.net.dhcp_subnet_for_ip(dhcp_subnet_by_cidr) }}"
-        hw_address: "{{ item.mac }}"
-        ip_address: "{{ item.ip }}"
-        hostname: "{{ item.hostname }}"
-        description: "{{ item.description }}"
-        option_data:
-          tftp_server_name: "{{ item.pxe_tftp_server | default('') }}"
-          boot_file_name: "{{ item.pxe_boot_file | default('') }}"
+      reservation: "{{ item.send }}"
     status_code: [200, 201]
     return_content: true
   failed_when: >-
     (update_results.json | default({})).result | default('') != 'saved'
-  loop: "{{ reservations_to_update }}"
+  loop: "{{ _res_drift }}"
   loop_control:
-    label: "Updating: {{ item.hostname }} ({{ item.mac }} -> {{ item.ip }})"
-  when:
-    - reservations_to_update | length > 0
+    label: "Updating: {{ item.hostname }}: {{ item.report | join('; ') }}"
   register: update_results
   delegate_to: localhost
   changed_when: true
@@ -310,6 +362,6 @@
     msg: |
       DHCP reservation configuration complete (Kea DHCP):
       - Added: {{ reservations_to_add | length }}
-      - Checked for updates: {{ reservations_to_update | length }}
+      - Checked for updates: {{ reservations_to_update | length }}, updated: {{ _res_drift | length }}
       - Removed: {{ (delete_results.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list | length) | default(0) }}
       - Subnet mappings: {{ dhcp_subnet_by_cidr | length }} subnets
