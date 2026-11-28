@@ -1,11 +1,20 @@
 ---
-# Create Kea DHCP subnets from deevnet_vlans definitions
+# Kea DHCP subnets from deevnet_vlans
 #
-# For each VLAN with dhcp_range_start and dhcp_range_end defined,
-# creates a Kea DHCP subnet if one doesn't already exist for that
-# subnet CIDR, and sets the pool of one that does when it differs.
+# For each VLAN with dhcp_range_start and dhcp_range_end defined, the subnet's
+# declared settings are worked out once (Step 2), a subnet that does not exist
+# is created with them (Step 3), and one that does is brought into line with
+# them (Step 4). The settings converge on every run instead of being seeded at
+# creation only, so a field changed on the router, or one inventory moves, is
+# put back by the next run.
+#
+# Converged fields: pools, description, option_data.routers,
+# option_data.domain_name_servers, option_data.domain_name, and next_server on
+# the subnet that holds the pxe host. Every other field on the subnet (the ones
+# Kea or the GUI fill, and anything set by hand) is neither sent nor compared,
+# and the read-back in Step 4 proves a write left them as they were.
 
-# Step 1: Get existing subnets
+# Step 1: Existing subnets, CIDR -> UUID
 - name: Get current Kea DHCP subnets
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/kea/dhcpv4/search_subnet"
@@ -21,23 +30,89 @@
   delegate_to: localhost
   check_mode: false  # read-only query; must run so --check can compute a diff
 
-# Step 2: Build lookup of existing subnet CIDRs -> UUIDs
 - name: Build existing subnet lookup
   ansible.builtin.set_fact:
     _existing_subnet_map: >-
-      {{
-        _existing_subnet_map | default({}) | combine({
-          (item.subnet): item.uuid
-        })
-      }}
-  loop: "{{ existing_subnets.json.rows | default([]) }}"
-  loop_control:
-    label: "{{ item.subnet }}"
+      {{ dict(existing_subnets.json.rows | default([])
+              | map(attribute='subnet')
+              | zip(existing_subnets.json.rows | default([]) | map(attribute='uuid'))) }}
 
-- name: Ensure existing subnet map is defined
+# Step 2a: next-server follows the `pxe` name.
+#
+# UEFI firmware fetches its boot file from the DHCP header's next-server
+# (siaddr), not from option 66, so a reservation's tftp_server_name alone does
+# not move a network boot, and a reservation has no next_server field: the
+# subnet is the only place it can live. It was set by hand on the router, and a
+# repave that moved `pxe` to the temporary builder but not this left the Builder
+# asking itself for grubx64.efi (CHG-0092). Now the host whose interface carries
+# the `pxe` CNAME sets next-server on the subnet its address is in. A subnet
+# with no such host is not given one, and whatever it holds is left alone.
+- name: Find the addresses that carry the pxe name
   ansible.builtin.set_fact:
-    _existing_subnet_map: {}
-  when: _existing_subnet_map is not defined
+    _pxe_ips: >-
+      {%- set out = [] -%}
+      {%- for h in groups['all'] -%}
+      {%- for n, i in (hostvars[h].env.interfaces | default({})).items() -%}
+      {%- if 'pxe' in ((i.dns | default({})).cnames | default([])) and i.ip is defined -%}
+      {%- set _ = out.append({'host': h, 'ip': i.ip}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+    # Keyed by CIDR rather than UUID, so a subnet Step 3 is about to create
+    # gets its next-server in the same write.
+    _vlan_cidrs: >-
+      {{ dict(deevnet_vlans | dict2items | selectattr('value.subnet', 'defined')
+              | map(attribute='value.subnet') | zip(deevnet_vlans | dict2items
+              | selectattr('value.subnet', 'defined') | map(attribute='value.subnet'))) }}
+
+- name: Work out each subnet's next-server
+  ansible.builtin.set_fact:
+    _next_server_want: >-
+      {%- set out = {} -%}
+      {%- for p in _pxe_ips -%}
+      {%- set cidr = p.ip | deevnet.net.dhcp_subnet_for_ip(_vlan_cidrs) -%}
+      {%- if cidr | length > 0 -%}
+      {%- set _ = out.update({cidr: p.ip}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: One pxe host per subnet
+  ansible.builtin.assert:
+    that: (_pxe_ips | map(attribute='ip')
+           | map('deevnet.net.dhcp_subnet_for_ip', _vlan_cidrs)
+           | select | list | length)
+          == (_next_server_want | length)
+    fail_msg: >-
+      More than one host in a subnet carries the pxe CNAME: {{ _pxe_ips }}.
+      Network boot has one server per subnet; move the name to one of them.
+
+# Step 2b: Each subnet's declared settings, the one place they are written down.
+# Step 3 creates from them and Step 4 converges to them.
+- name: Work out each subnet's declared settings
+  ansible.builtin.set_fact:
+    _subnet_want: >-
+      {%- set out = {} -%}
+      {%- for k, v in deevnet_vlans.items()
+            if v.dhcp_range_start is defined
+            and v.dhcp_range_end is defined
+            and v.subnet is defined -%}
+      {%- set w = {
+            'pools': v.dhcp_range_start ~ ' - ' ~ v.dhcp_range_end,
+            'description': k ~ ' (VLAN ' ~ v.vlan_id ~ ')',
+            'option_data': {
+              'routers': v.gateway,
+              'domain_name_servers': v.gateway,
+              'domain_name': deevnet_root_domain | default('deevnet.net'),
+            },
+          } -%}
+      {%- if v.subnet in _next_server_want -%}
+      {%- set _ = w.update({'next_server': _next_server_want[v.subnet]}) -%}
+      {%- endif -%}
+      {%- set _ = out.update({k: w}) -%}
+      {%- endfor -%}
+      {{ out }}
 
 # Step 3: Create missing subnets
 - name: Create DHCP subnets for VLANs
@@ -50,27 +125,15 @@
     validate_certs: "{{ opnsense_validate_certs }}"
     body_format: json
     body:
-      subnet4:
-        subnet: "{{ item.value.subnet }}"
-        pools: "{{ item.value.dhcp_range_start }} - {{ item.value.dhcp_range_end }}"
-        description: "{{ item.key }} (VLAN {{ item.value.vlan_id }})"
-        option_data:
-          routers: "{{ item.value.gateway }}"
-          domain_name_servers: "{{ item.value.gateway }}"
-          domain_name: "{{ deevnet_root_domain | default('deevnet.net') }}"
-        option_data_autocollect: "1"
+      subnet4: "{{ item.value | combine({'subnet': deevnet_vlans[item.key].subnet, 'option_data_autocollect': '1'}) }}"
     status_code: [200, 201]
     return_content: true
   failed_when: >-
     (subnet_results.json | default({})).result | default('') != 'saved'
-  loop: "{{ deevnet_vlans | dict2items }}"
+  loop: "{{ _subnet_want | dict2items }}"
   loop_control:
-    label: "{{ item.key }}: {{ item.value.subnet | default('no subnet') }}"
-  when:
-    - item.value.dhcp_range_start is defined
-    - item.value.dhcp_range_end is defined
-    - item.value.subnet is defined
-    - item.value.subnet not in _existing_subnet_map
+    label: "{{ item.key }}: {{ deevnet_vlans[item.key].subnet }}"
+  when: deevnet_vlans[item.key].subnet not in _existing_subnet_map
   register: subnet_results
   delegate_to: localhost
   changed_when: true
@@ -84,69 +147,57 @@
       already existed: {{ subnet_results.results | default([])
         | selectattr('skipped', 'defined') | selectattr('skipped') | list | length }}
 
-# Step 3b: Bring an existing subnet's pool into line with inventory.
+# Step 4: Bring existing subnets into line with their declared settings.
 #
-# Step 3 only creates. A subnet that already existed kept the pool it was made
-# with, so moving dhcp_range_start/end in deevnet_vlans never reached the
-# router. That mattered once the IoT segment's pool moved to make room for
-# tenants' device addresses below it (ADR-0035, CHG-0044): a pool left where
-# it was would lease addresses the Deevnet API reserves.
-#
-# Only `pools` is sent. The read-back below is what proves the write changed
-# that and nothing else: this build's set_subnet is expected to leave fields it
-# was not sent alone, and the assertion fails the run if it did not.
-- name: Read existing DHCP subnets that inventory gives a pool
+# Only the fields that differ are sent. This build's set_subnet leaves fields
+# it was not sent alone (first relied on for the IoT pool move, ADR-0035,
+# CHG-0044); the read-back below proves it every time, and fails the run if a
+# write moved anything it was not sent.
+- name: Read existing DHCP subnets that inventory declares
   ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ _existing_subnet_map[item.value.subnet] }}"
+    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ _existing_subnet_map[deevnet_vlans[item.key].subnet] }}"
     method: GET
     user: "{{ opnsense_api_key }}"
     password: "{{ opnsense_api_secret }}"
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     return_content: true
-  loop: "{{ deevnet_vlans | dict2items }}"
+  loop: "{{ _subnet_want | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
-  when:
-    - item.value.dhcp_range_start is defined
-    - item.value.dhcp_range_end is defined
-    - item.value.subnet is defined
-    - item.value.subnet in _existing_subnet_map
-  register: _subnet_details
+  when: deevnet_vlans[item.key].subnet in _existing_subnet_map
+  register: _subnet_before
   delegate_to: localhost
   check_mode: false  # read-only query; must run so --check can compute a diff
 
-- name: Work out which pools differ from inventory
+- name: Work out which subnets differ from inventory
   ansible.builtin.set_fact:
-    _subnet_pools_to_set: >-
-      {{
-        _subnet_pools_to_set | default([]) + [{
-          'key': item.item.key,
-          'uuid': _existing_subnet_map[item.item.value.subnet],
-          'have': item.json.subnet4.pools | default(''),
-          'want': item.item.value.dhcp_range_start ~ ' - ' ~ item.item.value.dhcp_range_end,
-          'routers': item.json.subnet4.option_data.routers | default(''),
-          'subnet': item.json.subnet4.subnet | default('')
-        }]
-      }}
-  loop: "{{ _subnet_details.results }}"
-  loop_control:
-    label: "{{ item.item.key }}"
-  when:
-    - item.json is defined
-    - item.json.subnet4 is defined
-    - (item.json.subnet4.pools | default('') | string | regex_replace('\\s', ''))
-      != (item.item.value.dhcp_range_start ~ '-' ~ item.item.value.dhcp_range_end)
+    _subnet_drift: >-
+      {%- set out = [] -%}
+      {%- for r in _subnet_before.results
+            if r.json is defined and r.json.subnet4 is defined -%}
+      {%- set send = r.item.value | deevnet.net.kea_diff(r.json.subnet4) -%}
+      {%- if send | length > 0 -%}
+      {%- set _ = out.append({
+            'key': r.item.key,
+            'uuid': _existing_subnet_map[deevnet_vlans[r.item.key].subnet],
+            'before': r.json.subnet4,
+            'send': send,
+            'report': r.item.value | deevnet.net.kea_drift_report(r.json.subnet4),
+          }) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
 
-- name: Report pools that differ from inventory
+- name: Report subnet settings that differ from inventory
   ansible.builtin.debug:
-    msg: "{{ item.key }}: pool is '{{ item.have }}', inventory says '{{ item.want }}'"
-  loop: "{{ _subnet_pools_to_set | default([]) }}"
+    msg: "{{ item.key }}: {{ item.report }}"
+  loop: "{{ _subnet_drift }}"
   loop_control:
     label: "{{ item.key }}"
   changed_when: true
 
-- name: Set the pool of existing DHCP subnets
+- name: Set the differing settings on existing DHCP subnets
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/kea/dhcpv4/set_subnet/{{ item.uuid }}"
     method: POST
@@ -156,21 +207,20 @@
     validate_certs: "{{ opnsense_validate_certs }}"
     body_format: json
     body:
-      subnet4:
-        pools: "{{ item.want }}"
+      subnet4: "{{ item.send }}"
     status_code: [200, 201]
     return_content: true
   failed_when: >-
-    (_pool_results.json | default({})).result | default('') != 'saved'
-  loop: "{{ _subnet_pools_to_set | default([]) }}"
+    (_converge_results.json | default({})).result | default('') != 'saved'
+  loop: "{{ _subnet_drift }}"
   loop_control:
-    label: "{{ item.key }}: {{ item.have }} -> {{ item.want }}"
-  register: _pool_results
+    label: "{{ item.key }}: {{ item.report | join('; ') }}"
+  register: _converge_results
   delegate_to: localhost
   changed_when: true
   notify: reconfigure dhcp
 
-- name: Read back the subnets whose pool was set
+- name: Read back the subnets that were set
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ item.uuid }}"
     method: GET
@@ -179,25 +229,24 @@
     force_basic_auth: true
     validate_certs: "{{ opnsense_validate_certs }}"
     return_content: true
-  loop: "{{ _subnet_pools_to_set | default([]) }}"
+  loop: "{{ _subnet_drift }}"
   loop_control:
     label: "{{ item.key }}"
   register: _subnet_after
   delegate_to: localhost
   when: not ansible_check_mode
 
-- name: Assert the pool changed and nothing else on the subnet did
+- name: Assert each subnet now matches inventory and nothing else on it moved
   ansible.builtin.assert:
     that:
-      - (item.json.subnet4.pools | string | regex_replace('\\s', '')) == (item.item.want | regex_replace('\\s', ''))
-      - (item.json.subnet4.subnet | default('')) == item.item.subnet
-      - (item.json.subnet4.option_data.routers | default('')) == item.item.routers
+      - (item.item.send | deevnet.net.kea_diff(item.json.subnet4)) | length == 0
+      - (item.item.before | deevnet.net.kea_changed(item.json.subnet4, item.item.send)) | length == 0
     fail_msg: >-
-      Setting the pool of {{ item.item.key }} left the subnet as
-      {{ item.json.subnet4 | default({}) }}. Expected the pool
-      '{{ item.item.want }}' with subnet '{{ item.item.subnet }}' and routers
-      '{{ item.item.routers }}' unchanged. Put it right in the router's UI
-      before running this again.
+      Setting {{ item.item.send }} on {{ item.item.key }} left it still
+      differing in {{ item.item.send | deevnet.net.kea_drift_report(item.json.subnet4) }}
+      and changed fields it was not sent:
+      {{ item.item.before | deevnet.net.kea_changed(item.json.subnet4, item.item.send) }}.
+      Put it right in the router's UI before running this again.
   loop: "{{ _subnet_after.results | default([]) }}"
   loop_control:
     label: "{{ item.item.key | default('skipped') }}"
@@ -205,126 +254,7 @@
     - not ansible_check_mode
     - item.json is defined
 
-# Step 3c: The subnet's next-server follows the `pxe` name.
-#
-# UEFI firmware fetches its boot file from the DHCP header's next-server
-# (siaddr), not from option 66, so a reservation's tftp_server_name alone does
-# not move a network boot. It was set by hand on the router, and a repave that
-# moved `pxe` to the temporary builder but not this left the Builder asking
-# itself for grubx64.efi (CHG-0092). Now the host whose interface carries the
-# `pxe` CNAME sets next-server on the subnet its address is in. A subnet with
-# no such host is left as it is.
-- name: Find the addresses that carry the pxe name
-  ansible.builtin.set_fact:
-    _pxe_ips: >-
-      {%- set out = [] -%}
-      {%- for h in groups['all'] -%}
-      {%- for n, i in (hostvars[h].env.interfaces | default({})).items() -%}
-      {%- if 'pxe' in ((i.dns | default({})).cnames | default([])) and i.ip is defined -%}
-      {%- set _ = out.append({'host': h, 'ip': i.ip}) -%}
-      {%- endif -%}
-      {%- endfor -%}
-      {%- endfor -%}
-      {{ out }}
-
-- name: Work out each subnet's next-server
-  ansible.builtin.set_fact:
-    _next_server_want: >-
-      {{
-        _next_server_want | default({}) | combine({
-          (item.ip | deevnet.net.dhcp_subnet_for_ip(_existing_subnet_map)): item.ip
-        })
-      }}
-  loop: "{{ _pxe_ips }}"
-  loop_control:
-    label: "{{ item.host }}: {{ item.ip }}"
-  when: (item.ip | deevnet.net.dhcp_subnet_for_ip(_existing_subnet_map)) | length > 0
-
-- name: One pxe host per subnet
-  ansible.builtin.assert:
-    that: (_pxe_ips | map(attribute='ip')
-           | map('deevnet.net.dhcp_subnet_for_ip', _existing_subnet_map)
-           | select | list | length)
-          == (_next_server_want | default({}) | length)
-    fail_msg: >-
-      More than one host in a subnet carries the pxe CNAME: {{ _pxe_ips }}.
-      Network boot has one server per subnet; move the name to one of them.
-
-- name: Read the subnets that get a next-server
-  ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ item.key }}"
-    method: GET
-    user: "{{ opnsense_api_key }}"
-    password: "{{ opnsense_api_secret }}"
-    force_basic_auth: true
-    validate_certs: "{{ opnsense_validate_certs }}"
-    return_content: true
-  loop: "{{ _next_server_want | default({}) | dict2items }}"
-  loop_control:
-    label: "{{ item.value }}"
-  register: _ns_before
-  delegate_to: localhost
-  check_mode: false  # read-only query; must run so --check can compute a diff
-
-- name: Set next-server on the subnets where it differs
-  ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/kea/dhcpv4/set_subnet/{{ item.item.key }}"
-    method: POST
-    user: "{{ opnsense_api_key }}"
-    password: "{{ opnsense_api_secret }}"
-    force_basic_auth: true
-    validate_certs: "{{ opnsense_validate_certs }}"
-    body_format: json
-    body:
-      subnet4:
-        next_server: "{{ item.item.value }}"
-    status_code: [200, 201]
-    return_content: true
-  failed_when: >-
-    (_ns_results.json | default({})).result | default('') != 'saved'
-  loop: "{{ _ns_before.results | default([]) }}"
-  loop_control:
-    label: "{{ item.json.subnet4.subnet | default(item.item.key) }}: {{ item.json.subnet4.next_server | default('') }} -> {{ item.item.value }}"
-  when:
-    - item.json is defined
-    - (item.json.subnet4.next_server | default('')) != item.item.value
-  register: _ns_results
-  delegate_to: localhost
-  changed_when: true
-  notify: reconfigure dhcp
-
-- name: Read back the subnets whose next-server was set
-  ansible.builtin.uri:
-    url: "{{ opnsense_api_url }}/kea/dhcpv4/get_subnet/{{ item.item.item.key }}"
-    method: GET
-    user: "{{ opnsense_api_key }}"
-    password: "{{ opnsense_api_secret }}"
-    force_basic_auth: true
-    validate_certs: "{{ opnsense_validate_certs }}"
-    return_content: true
-  loop: "{{ _ns_results.results | default([]) | rejectattr('skipped', 'defined') | list }}"
-  loop_control:
-    label: "{{ item.item.item.value }}"
-  register: _ns_after
-  delegate_to: localhost
-  when: not ansible_check_mode
-
-- name: Assert next-server changed and nothing else on the subnet did
-  ansible.builtin.assert:
-    that:
-      - item.json.subnet4.next_server == item.item.item.item.value
-      - item.json.subnet4.subnet == item.item.item.json.subnet4.subnet
-      - item.json.subnet4.pools == item.item.item.json.subnet4.pools
-      - item.json.subnet4.option_data.routers == item.item.item.json.subnet4.option_data.routers
-    fail_msg: >-
-      Setting next-server left the subnet as {{ item.json.subnet4 | default({}) }}.
-      Put it right in the router's UI before running this again.
-  loop: "{{ _ns_after.results | default([]) | rejectattr('skipped', 'defined') | list }}"
-  loop_control:
-    label: "{{ item.item.item.item.value | default('skipped') }}"
-  when: not ansible_check_mode
-
-# Step 4: Re-fetch subnets to get UUIDs for newly created ones
+# Step 5: Re-fetch subnets to get UUIDs for newly created ones
 - name: Get updated Kea DHCP subnets
   ansible.builtin.uri:
     url: "{{ opnsense_api_url }}/kea/dhcpv4/search_subnet"
@@ -340,23 +270,13 @@
   delegate_to: localhost
   check_mode: false  # read-only query; must run so --check can compute a diff
 
-# Step 5: Build subnet CIDR -> UUID mapping for reservations
+# Step 6: Build subnet CIDR -> UUID mapping for reservations
 - name: Build subnet UUID lookup
   ansible.builtin.set_fact:
     dhcp_subnet_by_cidr: >-
-      {{
-        dhcp_subnet_by_cidr | default({}) | combine({
-          (item.subnet): item.uuid
-        })
-      }}
-  loop: "{{ updated_subnets.json.rows | default([]) }}"
-  loop_control:
-    label: "{{ item.subnet }} -> {{ item.uuid }}"
-
-- name: Ensure dhcp_subnet_by_cidr is defined
-  ansible.builtin.set_fact:
-    dhcp_subnet_by_cidr: {}
-  when: dhcp_subnet_by_cidr is not defined
+      {{ dict(updated_subnets.json.rows | default([])
+              | map(attribute='subnet')
+              | zip(updated_subnets.json.rows | default([]) | map(attribute='uuid'))) }}
 
 - name: Display subnet UUID mapping
   ansible.builtin.debug:
